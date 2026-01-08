@@ -1,0 +1,35 @@
+# Binaries
+build/
+*.exe
+s3smb-gateway
+
+# Test coverage
+coverage.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Dependencies (use go mod)
+vendor/
+
+# Local configuration (may contain secrets)
+config.json
+*.local.json
+
+# Cache and data directories
+/var/cache/s3smb-gateway/
+/var/lib/s3smb-gateway/
+
+# Temporary files
+*.tmp
+*.temp
+*.log

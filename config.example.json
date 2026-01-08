@@ -1,0 +1,15 @@
+{
+  "s3": {
+    "bucket": "my-bucket",
+    "region": "us-east-1",
+    "endpoint": "",
+    "profile": "",
+    "prefix": ""
+  },
+  "mount_point": "/mnt/s3",
+  "cache_dir": "/var/cache/s3smb-gateway",
+  "db_path": "/var/lib/s3smb-gateway/metadata.db",
+  "chunk_size": 16777216,
+  "max_cache_size": 10737418240,
+  "debug": false
+}
