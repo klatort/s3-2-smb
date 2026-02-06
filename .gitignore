@@ -1,7 +1,7 @@
 # Binaries
 build/
 *.exe
-s3smb-gateway
+/s3smb-gateway
 
 # Test coverage
 coverage.out
