@@ -4,6 +4,8 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"time"
 )
 
@@ -107,4 +109,60 @@ func (e *FileEntry) ListXattrNames() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// Posix ownership and mode helpers stored as xattrs so they persist in SQLite.
+// Keys used: user.posix.uid, user.posix.gid, user.posix.mode
+
+// SetPosixOwner stores uid and gid as decimal strings in xattrs.
+func (e *FileEntry) SetPosixOwner(uid, gid uint32) {
+	if e.Xattrs == nil {
+		e.Xattrs = make(XattrMap)
+	}
+	e.Xattrs["user.posix.uid"] = []byte(fmt.Sprintf("%d", uid))
+	e.Xattrs["user.posix.gid"] = []byte(fmt.Sprintf("%d", gid))
+}
+
+// GetPosixOwner returns uid,gid and whether they were found.
+func (e *FileEntry) GetPosixOwner() (uint32, uint32, bool) {
+	if e.Xattrs == nil {
+		return 0, 0, false
+	}
+	uidb, uok := e.Xattrs["user.posix.uid"]
+	gidb, gok := e.Xattrs["user.posix.gid"]
+	if !uok || !gok {
+		return 0, 0, false
+	}
+	var uid, gid uint32
+	if _, err := fmt.Sscanf(string(uidb), "%d", &uid); err != nil {
+		return 0, 0, false
+	}
+	if _, err := fmt.Sscanf(string(gidb), "%d", &gid); err != nil {
+		return 0, 0, false
+	}
+	return uid, gid, true
+}
+
+// SetPosixMode stores the file mode as an octal/decimal string in xattrs.
+func (e *FileEntry) SetPosixMode(mode os.FileMode) {
+	if e.Xattrs == nil {
+		e.Xattrs = make(XattrMap)
+	}
+	e.Xattrs["user.posix.mode"] = []byte(fmt.Sprintf("%o", uint32(mode)))
+}
+
+// GetPosixMode returns the stored mode and whether it was found.
+func (e *FileEntry) GetPosixMode() (os.FileMode, bool) {
+	if e.Xattrs == nil {
+		return 0, false
+	}
+	mb, ok := e.Xattrs["user.posix.mode"]
+	if !ok {
+		return 0, false
+	}
+	var m uint32
+	if _, err := fmt.Sscanf(string(mb), "%o", &m); err != nil {
+		return 0, false
+	}
+	return os.FileMode(m), true
 }

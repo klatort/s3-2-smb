@@ -69,66 +69,28 @@ Create a configuration file (see `config.example.json`):
 }
 ```
 
-### Credentials (Security Best Practices)
+## Credentials & endpoints (critical)
 
-**⚠️ Never store credentials in configuration files!**
+The gateway requires valid S3 credentials to upload file data. If credentials are missing the AWS SDK may attempt EC2 instance metadata (IMDS) and fail with messages like "no EC2 IMDS role found" — this will cause writes to fail at file close.
 
-Credentials are resolved in this order (most secure first):
+Recommended credential methods (in order):
 
-1. **Environment variables** (recommended):
-   ```bash
-   export AWS_ACCESS_KEY_ID="your-access-key"
-   export AWS_SECRET_ACCESS_KEY="your-secret-key"
-   # Or use S3_ prefix for non-AWS services:
-   export S3_ACCESS_KEY="your-access-key"
-   export S3_SECRET_KEY="your-secret-key"
-   ```
-
-2. **AWS Profile** (recommended for development):
-   ```bash
-   # In config.json:
-   # "profile": "my-profile"
-   # Or via environment:
-   export AWS_PROFILE=my-profile
-   ```
-   
-   Profiles are stored in `~/.aws/credentials`:
-   ```ini
-   [my-profile]
-   aws_access_key_id = YOUR_KEY
-   aws_secret_access_key = YOUR_SECRET
-   ```
-
-3. **AWS shared credentials file** (`~/.aws/credentials`)
-
-4. **IAM instance role** (for EC2/ECS - most secure for cloud deployments)
-
-#### Environment Variable Reference
-
-| Variable | Description |
-|----------|-------------|
-| `AWS_ACCESS_KEY_ID` / `S3_ACCESS_KEY` | Access key ID |
-| `AWS_SECRET_ACCESS_KEY` / `S3_SECRET_KEY` | Secret access key |
-| `AWS_PROFILE` / `S3_PROFILE` | AWS profile name |
-| `AWS_REGION` / `S3_REGION` | Region (overrides config) |
-| `S3_BUCKET` | Bucket name (overrides config) |
-| `S3_ENDPOINT` | Endpoint URL (overrides config) |
-
-#### Using with systemd
-
-For systemd services, use a separate environment file:
-
+- Environment variables (recommended for quick deploy):
 ```bash
-# /etc/s3smb-gateway/credentials (chmod 600)
-AWS_ACCESS_KEY_ID=your-key
-AWS_SECRET_ACCESS_KEY=your-secret
+export AWS_ACCESS_KEY_ID=yourkey
+export AWS_SECRET_ACCESS_KEY=yoursecret
+export AWS_REGION=your-region
 ```
 
-```ini
-# In systemd service file
-[Service]
-EnvironmentFile=/etc/s3smb-gateway/credentials
-```
+- AWS profile (for development): set `profile` in config or `AWS_PROFILE` env var and use `~/.aws/credentials` for the profile.
+
+- IAM instance role (EC2/ECS) when running in cloud — most secure.
+
+Important endpoint notes:
+- If you use a custom S3-compatible endpoint (MinIO, Huawei OBS, Ceph), include the scheme (https://) in `S3.Endpoint`.
+- The gateway uses virtual-host style addressing for custom endpoints (bucket in hostname). If your service requires path-style addressing you will need to modify `s3client.NewClient` accordingly.
+
+On startup the gateway performs a quick `HeadBucket` check and will fail fast with a helpful hint if credentials or endpoint are misconfigured.
 
 ## Samba Integration
 

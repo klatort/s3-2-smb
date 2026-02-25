@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -79,11 +80,31 @@ func NewClient(ctx context.Context, cfg *appconfig.Config) (*Client, error) {
 	if cfg.S3.Endpoint != "" {
 		s3Opts = append(s3Opts, func(o *s3.Options) {
 			o.BaseEndpoint = aws.String(cfg.S3.Endpoint)
-			o.UsePathStyle = true // Required for most S3-compatible services
+			// Some S3-compatible endpoints require virtual-host style (bucket in hostname).
+			// Do not force path-style; allow virtual-host addressing so services that
+			// require bucket as host (e.g. Huawei OBS) work correctly.
+			o.UsePathStyle = false
 		})
 	}
 
 	client := s3.NewFromConfig(awsCfg, s3Opts...)
+
+	// Quick sanity check: verify we can access the configured bucket. This
+	// surfaces missing credentials (e.g., SDK trying EC2 IMDS) or misconfigured
+	// bucket/region/endpoint early with a helpful hint instead of failing later
+	// on uploaded PutObject calls.
+	if cfg.S3.Bucket != "" {
+		headCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_, headErr := client.HeadBucket(headCtx, &s3.HeadBucketInput{Bucket: aws.String(cfg.S3.Bucket)})
+		if headErr != nil {
+			hint := "check S3 credentials (set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or provide AccessKey/SecretKey in config) and verify bucket/region/endpoint"
+			if strings.Contains(headErr.Error(), "ec2imds") || strings.Contains(headErr.Error(), "GetMetadata") {
+				hint = "no credentials found: SDK attempted EC2 IMDS and failed. Set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or add AccessKey/SecretKey to the gateway config"
+			}
+			return nil, fmt.Errorf("failed to access bucket %s: %w; hint: %s", cfg.S3.Bucket, headErr, hint)
+		}
+	}
 
 	chunkSize := cfg.ChunkSize
 	if chunkSize == 0 {
@@ -112,7 +133,7 @@ func (c *Client) GetFullKey(key string) string {
 // HeadObject retrieves object metadata without downloading content
 func (c *Client) HeadObject(ctx context.Context, key string) (*ObjectInfo, error) {
 	fullKey := c.GetFullKey(key)
-	
+
 	resp, err := c.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(c.bucket),
 		Key:    aws.String(fullKey),
@@ -300,7 +321,7 @@ func (c *Client) ListObjects(ctx context.Context, prefix string, delimiter strin
 		Bucket:  aws.String(c.bucket),
 		MaxKeys: aws.Int32(maxKeys),
 	}
-	
+
 	// Only set prefix if non-empty
 	if fullPrefix != "" {
 		input.Prefix = aws.String(fullPrefix)

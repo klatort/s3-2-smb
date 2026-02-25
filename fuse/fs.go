@@ -189,6 +189,7 @@ var _ fs.NodeGetxattrer = (*Dir)(nil)
 var _ fs.NodeSetxattrer = (*Dir)(nil)
 var _ fs.NodeListxattrer = (*Dir)(nil)
 var _ fs.NodeRemovexattrer = (*Dir)(nil)
+var _ fs.NodeSetattrer = (*Dir)(nil)
 
 // Attr returns the directory attributes from the SQLite database (NOT from S3)
 func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
@@ -229,6 +230,15 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 	a.Atime = entry.ModTime
 	a.Mtime = entry.ModTime
 	a.Ctime = entry.ModTime
+
+	// If POSIX ownership/mode stored in xattrs, expose them via Attr
+	if uid, gid, ok := entry.GetPosixOwner(); ok {
+		a.Uid = uid
+		a.Gid = gid
+	}
+	if mode, ok := entry.GetPosixMode(); ok {
+		a.Mode = os.ModeDir | mode
+	}
 
 	return nil
 }
@@ -315,6 +325,14 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 		return nil, err
 	}
 
+	// Persist requested mode/owner from request if provided
+	if req.Mode != 0 {
+		if modeEntry, err := d.fs.repo.GetEntry(ctx, childPath); err == nil {
+			modeEntry.SetPosixMode(os.FileMode(req.Mode))
+			_ = d.fs.repo.UpdateEntry(context.Background(), modeEntry)
+		}
+	}
+
 	// Create directory marker in S3 (async, non-blocking)
 	go func() {
 		s3Key := childPath
@@ -361,6 +379,14 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 
 	// Set response flags for direct I/O to avoid kernel caching issues
 	resp.Flags |= fuse.OpenDirectIO
+
+	// Persist requested mode/owner if provided
+	if req.Mode != 0 {
+		if e, err := d.fs.repo.GetEntry(ctx, childPath); err == nil {
+			e.SetPosixMode(os.FileMode(req.Mode))
+			_ = d.fs.repo.UpdateEntry(context.Background(), e)
+		}
+	}
 
 	return file, handle, nil
 }
@@ -552,6 +578,45 @@ func (d *Dir) Removexattr(ctx context.Context, req *fuse.RemovexattrRequest) err
 	return nil
 }
 
+// Setattr allows changing directory attributes such as owner, group, and mode
+func (d *Dir) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
+	entry, err := d.fs.repo.GetEntry(ctx, d.path)
+	if err != nil {
+		return err
+	}
+
+	if req.Valid.Mode() {
+		entry.SetPosixMode(os.FileMode(req.Mode))
+	}
+
+	if req.Valid.Uid() || req.Valid.Gid() {
+		uid, gid, _ := entry.GetPosixOwner()
+		if req.Valid.Uid() {
+			uid = req.Uid
+		}
+		if req.Valid.Gid() {
+			gid = req.Gid
+		}
+		entry.SetPosixOwner(uid, gid)
+	}
+
+	if err := d.fs.repo.UpdateEntry(ctx, entry); err != nil {
+		return err
+	}
+
+	resp.Attr.Inode = PathToInode(d.path)
+	resp.Attr.Mode = os.ModeDir | 0755
+	if mode, ok := entry.GetPosixMode(); ok {
+		resp.Attr.Mode = os.ModeDir | mode
+	}
+	if uid, gid, ok := entry.GetPosixOwner(); ok {
+		resp.Attr.Uid = uid
+		resp.Attr.Gid = gid
+	}
+
+	return nil
+}
+
 // ============================================================================
 // File Node
 // ============================================================================
@@ -606,6 +671,15 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 	// Update cached entry
 	f.entry = entry
 
+	// If POSIX ownership/mode stored in xattrs, expose them via Attr
+	if uid, gid, ok := entry.GetPosixOwner(); ok {
+		a.Uid = uid
+		a.Gid = gid
+	}
+	if mode, ok := entry.GetPosixMode(); ok {
+		a.Mode = mode
+	}
+
 	return nil
 }
 
@@ -624,6 +698,24 @@ func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse
 	// Update modification time if requested
 	if req.Valid.Mtime() {
 		entry.ModTime = req.Mtime
+	}
+
+	// Update permissions/mode if requested
+	if req.Valid.Mode() {
+		entry.SetPosixMode(os.FileMode(req.Mode))
+	}
+
+	// Update ownership if requested
+	if req.Valid.Uid() || req.Valid.Gid() {
+		// Read existing uid/gid
+		uid, gid, _ := entry.GetPosixOwner()
+		if req.Valid.Uid() {
+			uid = req.Uid
+		}
+		if req.Valid.Gid() {
+			gid = req.Gid
+		}
+		entry.SetPosixOwner(uid, gid)
 	}
 
 	if err := f.fs.repo.UpdateEntry(ctx, entry); err != nil {
