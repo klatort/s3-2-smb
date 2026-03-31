@@ -12,6 +12,7 @@ import (
 
 	"github.com/s3smb-gateway/config"
 	"github.com/s3smb-gateway/db"
+	"github.com/s3smb-gateway/internal/log"
 	"github.com/s3smb-gateway/s3client"
 )
 
@@ -188,14 +189,14 @@ func (m *Manager) downloadChunk(ctx context.Context, file *db.FileMetadata, chun
 	// Ensure cache space
 	if err := m.ensureCacheSpace(int64(len(data))); err != nil {
 		// Log error but continue - we have data in memory
-		fmt.Printf("Warning: failed to ensure cache space: %v\n", err)
+		log.Warn("failed to ensure cache space: %v\n", err)
 	}
 	
 	// Write to cache
 	cachePath := m.GetChunkPath(file.ID, chunkIndex)
 	if err := os.WriteFile(cachePath, data, 0644); err != nil {
 		// Log error but continue - we have data in memory
-		fmt.Printf("Warning: failed to write chunk to cache: %v\n", err)
+		log.Warn("failed to write chunk to cache: %v\n", err)
 	} else {
 		// Calculate hash for integrity
 		hash := sha256.Sum256(data)
@@ -214,7 +215,7 @@ func (m *Manager) downloadChunk(ctx context.Context, file *db.FileMetadata, chun
 		}
 		
 		if err := m.db.CreateOrUpdateChunk(chunkInfo); err != nil {
-			fmt.Printf("Warning: failed to save chunk info: %v\n", err)
+			log.Warn("failed to save chunk info: %v\n", err)
 		}
 		
 		// Update current cache size

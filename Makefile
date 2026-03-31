@@ -103,6 +103,49 @@ install-service: systemd
 	sudo systemctl daemon-reload
 	@echo "Installed systemd service. Enable with: sudo systemctl enable s3smb-gateway"
 
+# Check for available updates
+check-update:
+	@echo "Checking for updates..."
+	@if [ -d .git ]; then \
+		git fetch origin; \
+		LOCAL=$(git rev-parse @); \
+		REMOTE=$(git rev-parse @{u}); \
+		BASE=$(git merge-base @ @{u}); \
+		if [ "$$LOCAL" = "$$REMOTE" ]; then \
+			echo "Already up-to-date"; \
+		elif [ "$$LOCAL" = "$$BASE" ]; then \
+			echo "Updates available. Run 'make update' to pull changes."; \
+		elif [ "$$REMOTE" = "$$BASE" ]; then \
+			echo "Local changes not pushed. Run 'git push' to push changes."; \
+		else \
+			echo "Diverged from remote. Consider 'git pull --rebase'."; \
+		fi; \
+	else \
+		echo "Not a git repository. Cannot check for updates."; \
+	fi
+
+# Update dependencies to latest compatible versions
+update-deps:
+	@echo "Updating dependencies..."
+	go get -u ./...
+	go mod tidy
+
+# Update application from git repository
+update:
+	@echo "Updating application from git..."
+	@if [ -d .git ]; then \
+		git pull; \
+		make deps; \
+		make build; \
+		echo "Update completed successfully."; \
+	else \
+		echo "Not a git repository. Cannot update."; \
+	fi
+
+# Upgrade application (reinstall after update)
+upgrade: update install
+	@echo "Upgrade completed. Application reinstalled."
+
 help:
 	@echo "Available targets:"
 	@echo "  build          - Build the binary"
@@ -119,3 +162,7 @@ help:
 	@echo "  build-all      - Build for linux amd64/arm64"
 	@echo "  systemd        - Generate systemd service file"
 	@echo "  install-service- Install systemd service"
+	@echo "  check-update   - Check for available updates"
+	@echo "  update-deps    - Update dependencies"
+	@echo "  update         - Update from git and rebuild"
+	@echo "  upgrade        - Update and reinstall"

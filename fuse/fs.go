@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -16,7 +17,9 @@ import (
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
 
+	"github.com/s3smb-gateway/cache"
 	"github.com/s3smb-gateway/config"
+	"github.com/s3smb-gateway/internal/log"
 	"github.com/s3smb-gateway/metadata"
 	"github.com/s3smb-gateway/s3client"
 )
@@ -35,9 +38,10 @@ const (
 
 // FS implements the FUSE filesystem
 type FS struct {
-	repo metadata.Repository // SQLite metadata repository
-	s3   *s3client.Client
-	cfg  *config.Config
+	repo  metadata.Repository // SQLite metadata repository
+	s3    *s3client.Client
+	cache *cache.ChunkManager // Cache manager for file chunks
+	cfg   *config.Config
 
 	mu   sync.RWMutex
 	conn *fuse.Conn
@@ -54,15 +58,34 @@ type FS struct {
 // s3Client: S3 client for actual data operations
 // cfg: configuration
 func NewFS(repo metadata.Repository, s3Client *s3client.Client, cfg *config.Config) *FS {
+	// Enable debug logging if configured
+	if cfg.Debug {
+		log.EnableDebug()
+	}
+
 	// Create staging directory
 	stagingDir := filepath.Join(cfg.CacheDir, "staging")
 	if err := os.MkdirAll(stagingDir, 0755); err != nil {
-		fmt.Printf("Warning: failed to create staging directory: %v\n", err)
+		log.Warn("Failed to create staging directory: %v", err)
+	}
+
+	// Create cache manager
+	var cacheMgr *cache.ChunkManager
+	if cfg.ChunkSize > 0 {
+		var err error
+		cacheMgr, err = cache.NewChunkManagerWithSize(cfg.CacheDir, s3Client, cfg.MaxCacheSize)
+		if err != nil {
+			log.Warn("Failed to initialize cache manager: %v", err)
+		} else {
+			log.Info("Cache manager initialized with chunk size: %d MB, max cache: %d MB",
+				cfg.ChunkSize/(1024*1024), cfg.MaxCacheSize/(1024*1024))
+		}
 	}
 
 	return &FS{
 		repo:       repo,
 		s3:         s3Client,
+		cache:      cacheMgr,
 		cfg:        cfg,
 		nextInode:  2, // 1 is reserved for root
 		stagingDir: stagingDir,
@@ -337,7 +360,7 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 	go func() {
 		s3Key := childPath
 		if err := d.fs.s3.CreateDirectory(context.Background(), s3Key); err != nil {
-			fmt.Printf("Warning: failed to create S3 directory %s: %v\n", s3Key, err)
+			log.Warn("Failed to create S3 directory %s: %v", s3Key, err)
 		}
 	}()
 
@@ -423,7 +446,7 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 	// Delete from S3 (async)
 	go func() {
 		if err := d.fs.s3.DeleteObject(context.Background(), childPath); err != nil {
-			fmt.Printf("Warning: failed to delete S3 object %s: %v\n", childPath, err)
+			log.Warn("failed to delete S3 object %s: %v\n", childPath, err)
 		}
 	}()
 
@@ -478,11 +501,11 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 	// Handle S3 rename (copy + delete) async
 	go func() {
 		if err := d.fs.s3.CopyObject(context.Background(), oldPath, newPath); err != nil {
-			fmt.Printf("Warning: failed to copy S3 object: %v\n", err)
+			log.Warn("failed to copy S3 object: %v\n", err)
 			return
 		}
 		if err := d.fs.s3.DeleteObject(context.Background(), oldPath); err != nil {
-			fmt.Printf("Warning: failed to delete old S3 object: %v\n", err)
+			log.Warn("failed to delete old S3 object: %v\n", err)
 		}
 	}()
 
@@ -751,37 +774,46 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 		dirty: false,
 	}
 
-	// If opening for write, create a staging file
-	if req.Flags.IsWriteOnly() || req.Flags.IsReadWrite() {
-		stagingPath := f.fs.pathToStagingFile(f.path)
+	// Always create a staging file for both read and write operations
+	// This ensures we have local data to read from
+	stagingPath := f.fs.pathToStagingFile(f.path)
 
-		// If file exists in S3, we might need to download it first for read-write
-		if req.Flags.IsReadWrite() && f.entry != nil && f.entry.Size > 0 {
-			// Download existing content to staging file
-			reader, _, err := f.fs.s3.GetObject(ctx, f.path)
-			if err == nil && reader != nil {
-				defer reader.Close()
-				data, err := io.ReadAll(reader)
-				if err == nil && len(data) > 0 {
-					if err := os.WriteFile(stagingPath, data, 0644); err != nil {
-						return nil, fmt.Errorf("failed to write staging file: %w", err)
-					}
+	// Check if file exists in S3 and has content
+	// We need to download the content for both read and write operations
+	if f.entry != nil && f.entry.Size > 0 {
+		// Download existing content to staging file for both read and write operations
+		reader, _, err := f.fs.s3.GetObject(ctx, f.path)
+		if err == nil && reader != nil {
+			defer reader.Close()
+			data, err := io.ReadAll(reader)
+			if err == nil && len(data) > 0 {
+				if err := os.WriteFile(stagingPath, data, 0644); err != nil {
+					return nil, fmt.Errorf("failed to write staging file: %w", err)
 				}
 			}
+		} else if err != nil && f.fs.cfg.Debug {
+			// Log debug info if file doesn't exist in S3
+			log.Debug("File %s not found in S3 or error downloading: %v\n", f.path, err)
 		}
-
-		// Open or create the staging file
-		stagingFile, err := os.OpenFile(stagingPath, os.O_RDWR|os.O_CREATE, 0644)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open staging file: %w", err)
-		}
-
-		handle.stagingPath = stagingPath
-		handle.stagingFile = stagingFile
-
-		// Use DirectIO to avoid kernel caching issues with our staging approach
-		resp.Flags |= fuse.OpenDirectIO
 	}
+
+	// Determine file open mode
+	flags := os.O_RDONLY
+	if req.Flags.IsWriteOnly() || req.Flags.IsReadWrite() {
+		flags = os.O_RDWR | os.O_CREATE
+	}
+
+	// Open or create the staging file
+	stagingFile, err := os.OpenFile(stagingPath, flags, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open staging file: %w", err)
+	}
+
+	handle.stagingPath = stagingPath
+	handle.stagingFile = stagingFile
+
+	// Use DirectIO to avoid kernel caching issues with our staging approach
+	resp.Flags |= fuse.OpenDirectIO
 
 	return handle, nil
 }
@@ -897,6 +929,9 @@ func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse
 		n, err := h.stagingFile.ReadAt(buf, req.Offset)
 		if err != nil && err != io.EOF {
 			// Fall through to S3 read
+			if h.file.fs.cfg.Debug {
+				log.Debug("Failed to read from staging file for %s: %v\n", h.file.path, err)
+			}
 		} else if n > 0 {
 			resp.Data = buf[:n]
 			return nil
@@ -905,15 +940,58 @@ func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse
 
 	// Otherwise, read from S3 (lazy loading)
 	s3Key := h.file.path
-	data, err := h.file.fs.s3.GetObjectChunk(ctx, s3Key, req.Offset, int64(req.Size))
-	if err != nil {
-		// File might not exist in S3 yet (newly created)
-		resp.Data = nil
+	
+	// Use cache manager if available, otherwise read directly from S3
+	if h.file.fs.cache != nil {
+		// Use cache manager for chunked reading
+		buf := make([]byte, req.Size)
+		n, err := h.file.fs.cache.Read(ctx, s3Key, req.Offset, req.Size, buf)
+		if err != nil {
+			// Check if this is a "not found" error
+			if strings.Contains(err.Error(), "NoSuchKey") || strings.Contains(err.Error(), "NotFound") {
+				// File doesn't exist in S3 (might be newly created)
+				if h.file.fs.cfg.Debug {
+					log.Debug("File %s not found in S3 during read: %v\n", s3Key, err)
+				}
+				// Return EOF (0 bytes) for non-existent files
+				resp.Data = nil
+				return nil
+			}
+			
+			// For other errors (network issues, permissions, etc.), log and return I/O error
+			if h.file.fs.cfg.Debug {
+				log.Debug("Cache read error for %s at offset %d size %d: %v\n", 
+					s3Key, req.Offset, req.Size, err)
+			}
+			return syscall.EIO
+		}
+		resp.Data = buf[:n]
+		return nil
+	} else {
+		// Fall back to direct S3 read
+		data, err := h.file.fs.s3.GetObjectChunk(ctx, s3Key, req.Offset, int64(req.Size))
+		if err != nil {
+			// Check if this is a "not found" error
+			if strings.Contains(err.Error(), "NoSuchKey") || strings.Contains(err.Error(), "NotFound") {
+				// File doesn't exist in S3 (might be newly created)
+				if h.file.fs.cfg.Debug {
+					log.Debug("File %s not found in S3 during read: %v\n", s3Key, err)
+				}
+				// Return EOF (0 bytes) for non-existent files
+				resp.Data = nil
+				return nil
+			}
+			
+			// For other errors (network issues, permissions, etc.), log and return I/O error
+			if h.file.fs.cfg.Debug {
+				log.Debug("S3 read error for %s at offset %d size %d: %v\n", 
+					s3Key, req.Offset, req.Size, err)
+			}
+			return syscall.EIO
+		}
+		resp.Data = data
 		return nil
 	}
-
-	resp.Data = data
-	return nil
 }
 
 // Write writes data to the local staging file
@@ -988,6 +1066,14 @@ func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) erro
 	// The user must know if the save failed
 	s3Key := h.file.path
 
+	// Invalidate cache for this file since it's being modified
+	if h.file.fs.cache != nil {
+		if h.file.fs.cfg.Debug {
+			log.Debug("Invalidating cache for modified file: %s\n", s3Key)
+		}
+		h.file.fs.cache.InvalidateFile(s3Key)
+	}
+
 	// Open staging file for reading
 	stagingFile, err := os.Open(h.stagingPath)
 	if err != nil {
@@ -1004,7 +1090,7 @@ func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) erro
 
 	// Upload to S3 using streaming (supports large files via multipart)
 	if err := h.file.fs.s3.PutObjectFromReader(ctx, s3Key, stagingFile, fileSize, "application/octet-stream"); err != nil {
-		fmt.Printf("Error: failed to upload %s to S3: %v\n", s3Key, err)
+		log.Error("failed to upload %s to S3: %v\n", s3Key, err)
 		return syscall.EIO // Return I/O error so user knows save failed
 	}
 
@@ -1020,13 +1106,13 @@ func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) erro
 	h.file.entry.ModTime = now
 
 	if err := h.file.fs.repo.UpdateEntry(ctx, h.file.entry); err != nil {
-		fmt.Printf("Warning: failed to update metadata after upload: %v\n", err)
+		log.Warn("failed to update metadata after upload: %v\n", err)
 		// Don't return error here - S3 upload succeeded, that's what matters
 	}
 
 	// Delete the local staging file after successful upload
 	if err := os.Remove(h.stagingPath); err != nil {
-		fmt.Printf("Warning: failed to remove staging file %s: %v\n", h.stagingPath, err)
+		log.Warn("failed to remove staging file %s: %v\n", h.stagingPath, err)
 	}
 
 	return nil // Success
