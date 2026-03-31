@@ -13,6 +13,7 @@ import (
 // S3Client defines the interface for S3 operations needed by SyncFromS3
 type S3Client interface {
 	ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
+	HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
 }
 
 // SyncOptions configures the S3 sync behavior
@@ -120,13 +121,28 @@ func SyncFromS3(ctx context.Context, repo Repository, client S3Client, bucket st
 			}
 
 			// Create the entry
-			entry := &FileEntry{
-				Path:    path,
-				Size:    aws.ToInt64(obj.Size),
-				ModTime: aws.ToTime(obj.LastModified),
-				IsDir:   isDir,
-				ETag:    strings.Trim(aws.ToString(obj.ETag), "\""),
-			}
+				// Get accurate size from HeadObject if ListObjectsV2 returns suspicious size
+				// Huawei OBS sometimes returns incorrect large sizes (~824GB) in ListObjectsV2
+				size := aws.ToInt64(obj.Size)
+				if size > 1024*1024*1024 { // If size > 1GB, verify with HeadObject
+					headResp, err := client.HeadObject(ctx, &s3.HeadObjectInput{
+						Bucket: aws.String(bucket),
+						Key:    obj.Key,
+					})
+					if err == nil && headResp.ContentLength != nil {
+						// Use the accurate size from HeadObject
+						size = *headResp.ContentLength
+					}
+				}
+
+				// Create the entry
+				entry := &FileEntry{
+					Path:    path,
+					Size:    size,
+					ModTime: aws.ToTime(obj.LastModified),
+					IsDir:   isDir,
+					ETag:    strings.Trim(aws.ToString(obj.ETag), "\""),
+				}
 
 			if err := repo.UpdateEntry(ctx, entry); err != nil {
 				return fmt.Errorf("failed to update entry %s: %w", path, err)

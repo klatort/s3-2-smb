@@ -57,7 +57,7 @@ type FS struct {
 // repo: SQLite metadata repository for cached file metadata
 // s3Client: S3 client for actual data operations
 // cfg: configuration
-func NewFS(repo metadata.Repository, s3Client *s3client.Client, cfg *config.Config) *FS {
+func NewFS(repo metadata.Repository, s3Client *s3client.Client, cfg *config.Config) (*FS, error) {
 	// Enable debug logging if configured
 	if cfg.Debug {
 		log.EnableDebug()
@@ -66,7 +66,7 @@ func NewFS(repo metadata.Repository, s3Client *s3client.Client, cfg *config.Conf
 	// Create staging directory
 	stagingDir := filepath.Join(cfg.CacheDir, "staging")
 	if err := os.MkdirAll(stagingDir, 0755); err != nil {
-		log.Warn("Failed to create staging directory: %v", err)
+		return nil, fmt.Errorf("failed to create staging directory %s: %w", stagingDir, err)
 	}
 
 	// Create cache manager
@@ -76,6 +76,8 @@ func NewFS(repo metadata.Repository, s3Client *s3client.Client, cfg *config.Conf
 		cacheMgr, err = cache.NewChunkManagerWithSize(cfg.CacheDir, s3Client, cfg.MaxCacheSize)
 		if err != nil {
 			log.Warn("Failed to initialize cache manager: %v", err)
+			// Don't fail entirely if cache manager fails, just log warning
+			// Filesystem can still work without cache
 		} else {
 			log.Info("Cache manager initialized with chunk size: %d MB, max cache: %d MB",
 				cfg.ChunkSize/(1024*1024), cfg.MaxCacheSize/(1024*1024))
@@ -89,7 +91,7 @@ func NewFS(repo metadata.Repository, s3Client *s3client.Client, cfg *config.Conf
 		cfg:        cfg,
 		nextInode:  2, // 1 is reserved for root
 		stagingDir: stagingDir,
-	}
+	}, nil
 }
 
 // GenerateInode generates a unique inode number
@@ -778,6 +780,11 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 	// This ensures we have local data to read from
 	stagingPath := f.fs.pathToStagingFile(f.path)
 
+	// Ensure staging directory exists
+	if err := os.MkdirAll(f.fs.stagingDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create staging directory %s: %w", f.fs.stagingDir, err)
+	}
+
 	// Check if file exists in S3 and has content
 	// We need to download the content for both read and write operations
 	if f.entry != nil && f.entry.Size > 0 {
@@ -785,20 +792,45 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 		reader, _, err := f.fs.s3.GetObject(ctx, f.path)
 		if err == nil && reader != nil {
 			defer reader.Close()
-			data, err := io.ReadAll(reader)
-			if err == nil && len(data) > 0 {
-				if err := os.WriteFile(stagingPath, data, 0644); err != nil {
-					return nil, fmt.Errorf("failed to write staging file: %w", err)
+			// Create or truncate the staging file
+			stagingFile, err := os.Create(stagingPath)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create staging file: %w", err)
+			}
+			defer stagingFile.Close()
+			
+			// Stream content from S3 to file
+			_, err = io.Copy(stagingFile, reader)
+			if err != nil {
+				// Clean up the partially written file
+				os.Remove(stagingPath)
+				return nil, fmt.Errorf("failed to download file content: %w", err)
+			}
+		} else if err != nil {
+			// Check if this is a "not found" error (file doesn't exist in S3)
+			errStr := err.Error()
+			if strings.Contains(errStr, "NoSuchKey") || strings.Contains(errStr, "NotFound") {
+				// File doesn't exist in S3 (might be newly created or deleted)
+				// Create empty staging file
+				if err := os.WriteFile(stagingPath, []byte{}, 0644); err != nil {
+					return nil, fmt.Errorf("failed to create empty staging file: %w", err)
+				}
+				log.Debug("File %s not found in S3, creating empty staging file\n", f.path)
+			} else {
+				// Other error (network, permissions, etc.)
+				log.Warn("Failed to download file %s from S3: %v", f.path, err)
+				// Don't fail open - create empty staging file and let read handle the error
+				// This allows opening files even when S3 is temporarily unavailable
+				if err := os.WriteFile(stagingPath, []byte{}, 0644); err != nil {
+					return nil, fmt.Errorf("failed to create staging file: %w", err)
 				}
 			}
-		} else if err != nil && f.fs.cfg.Debug {
-			// Log debug info if file doesn't exist in S3
-			log.Debug("File %s not found in S3 or error downloading: %v\n", f.path, err)
 		}
 	}
 
 	// Determine file open mode
-	flags := os.O_RDONLY
+	// Always use O_CREATE to ensure staging file exists
+	flags := os.O_RDONLY | os.O_CREATE
 	if req.Flags.IsWriteOnly() || req.Flags.IsReadWrite() {
 		flags = os.O_RDWR | os.O_CREATE
 	}

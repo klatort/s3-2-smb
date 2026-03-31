@@ -131,7 +131,7 @@ func (c *Client) GetFullKey(key string) string {
 }
 
 // HeadObject retrieves object metadata without downloading content
-func (c *Client) HeadObject(ctx context.Context, key string) (*ObjectInfo, error) {
+func (c *Client) HeadObjectInfo(ctx context.Context, key string) (*ObjectInfo, error) {
 	fullKey := c.GetFullKey(key)
 
 	resp, err := c.client.HeadObject(ctx, &s3.HeadObjectInput{
@@ -353,9 +353,23 @@ func (c *Client) ListObjects(ctx context.Context, prefix string, delimiter strin
 			etag = *obj.ETag
 		}
 
+		// Get accurate size from HeadObject if ListObjectsV2 returns suspicious size
+		// Huawei OBS sometimes returns incorrect large sizes (~824GB) in ListObjectsV2
+		size := *obj.Size
+		if size > 1024*1024*1024 { // If size > 1GB, verify with HeadObject
+			headResp, err := c.client.HeadObject(ctx, &s3.HeadObjectInput{
+				Bucket: aws.String(c.bucket),
+				Key:    obj.Key,
+			})
+			if err == nil && headResp.ContentLength != nil {
+				// Use the accurate size from HeadObject
+				size = *headResp.ContentLength
+			}
+		}
+
 		objects = append(objects, ObjectInfo{
 			Key:          *obj.Key,
-			Size:         *obj.Size,
+			Size:         size,
 			ETag:         etag,
 			LastModified: *obj.LastModified,
 			IsDirectory:  false,
@@ -382,7 +396,7 @@ func (c *Client) ObjectExists(ctx context.Context, key string) (bool, error) {
 	if key == "" {
 		return false, fmt.Errorf("key cannot be empty")
 	}
-	_, err := c.HeadObject(ctx, key)
+	_, err := c.HeadObjectInfo(ctx, key)
 	if err != nil {
 		// Check if it's a not found error
 		var notFound *types.NotFound
@@ -446,4 +460,9 @@ func (c *Client) GetBucket() string {
 // ListObjectsV2 wraps the S3 ListObjectsV2 API for compatibility with metadata.S3Client interface
 func (c *Client) ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
 	return c.client.ListObjectsV2(ctx, params, optFns...)
+}
+
+// HeadObject wraps the S3 HeadObject API for compatibility with metadata.S3Client interface
+func (c *Client) HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
+	return c.client.HeadObject(ctx, params, optFns...)
 }
