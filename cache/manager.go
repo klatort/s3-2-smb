@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/s3smb-gateway/internal/log"
 )
 
 // Constants for chunk management
@@ -285,7 +287,7 @@ func (cm *ChunkManager) ensureCacheSpace(neededBytes int64) {
 		// Delete the chunk file
 		if err := os.Remove(entry.path); err != nil {
 			if !os.IsNotExist(err) {
-				fmt.Printf("Warning: failed to remove cached chunk %s: %v\n", entry.path, err)
+				log.Warn("failed to remove cached chunk %s: %v\n", entry.path, err)
 			}
 		}
 
