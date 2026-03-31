@@ -290,7 +290,7 @@ func (m *Manager) processUpload(upload *db.PendingUpload) {
 	fileMeta, err := m.db.GetFileByS3Key(upload.S3Key)
 	if err == nil {
 		// Update ETag and sync status
-		info, err := m.s3.HeadObject(ctx, upload.S3Key)
+		info, err := m.s3.HeadObjectInfo(ctx, upload.S3Key)
 		if err == nil {
 			fileMeta.ETag = info.ETag
 			fileMeta.Size = info.Size

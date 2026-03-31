@@ -149,7 +149,10 @@ func run(cfg *config.Config, syncOnStart bool) error {
 
 	// Create filesystem with metadata repository
 	log.Info("Creating filesystem...")
-	filesystem := fusepkg.NewFS(repo, s3Client, cfg)
+	filesystem, err := fusepkg.NewFS(repo, s3Client, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create filesystem: %w", err)
+	}
 
 	// Mount filesystem
 	log.Info("Mounting filesystem...")
