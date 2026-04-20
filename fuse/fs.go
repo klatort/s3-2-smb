@@ -219,7 +219,7 @@ var _ fs.NodeSetattrer = (*Dir)(nil)
 // Attr returns the directory attributes from the SQLite database (NOT from S3)
 func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 	a.Inode = PathToInode(d.path)
-	a.Mode = os.ModeDir | 0755
+	a.Mode = os.ModeDir | 0777
 	a.Nlink = 2
 	a.Uid = uint32(os.Getuid())
 	a.Gid = uint32(os.Getgid())
@@ -630,7 +630,7 @@ func (d *Dir) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.
 	}
 
 	resp.Attr.Inode = PathToInode(d.path)
-	resp.Attr.Mode = os.ModeDir | 0755
+	resp.Attr.Mode = os.ModeDir | 0777
 	if mode, ok := entry.GetPosixMode(); ok {
 		resp.Attr.Mode = os.ModeDir | mode
 	}
@@ -665,7 +665,7 @@ var _ fs.NodeFsyncer = (*File)(nil)
 // Attr returns the file attributes from the SQLite database (NOT from S3)
 func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 	a.Inode = PathToInode(f.path)
-	a.Mode = 0644
+	a.Mode = 0666
 	a.Nlink = 1
 	a.Uid = uint32(os.Getuid())
 	a.Gid = uint32(os.Getgid())
@@ -751,7 +751,7 @@ func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse
 
 	// Fill response
 	resp.Attr.Inode = PathToInode(f.path)
-	resp.Attr.Mode = 0644
+	resp.Attr.Mode = 0666
 	resp.Attr.Nlink = 1
 	resp.Attr.Uid = uint32(os.Getuid())
 	resp.Attr.Gid = uint32(os.Getgid())
