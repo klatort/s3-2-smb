@@ -219,8 +219,6 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 	a.Inode = PathToInode(d.path)
 	a.Mode = os.ModeDir | 0777
 	a.Nlink = 2
-	a.Uid = uint32(os.Getuid())
-	a.Gid = uint32(os.Getgid())
 	a.Valid = 1 * time.Second // Force attribute TTL to 1 second
 
 	// For root directory, use defaults
@@ -352,10 +350,13 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 	}
 
 	// Persist requested mode/owner from request if provided
-	if req.Mode != 0 {
-		if modeEntry, err := d.fs.repo.GetEntry(ctx, childPath); err == nil {
-			modeEntry.SetPosixMode(os.FileMode(req.Mode))
-			_ = d.fs.repo.UpdateEntry(context.Background(), modeEntry)
+	if req.Mode != 0 || req.Uid != 0 || req.Gid != 0 {
+		if attrEntry, err := d.fs.repo.GetEntry(ctx, childPath); err == nil {
+			if req.Mode != 0 {
+				attrEntry.SetPosixMode(os.FileMode(req.Mode))
+			}
+			attrEntry.SetPosixOwner(req.Uid, req.Gid)
+			_ = d.fs.repo.UpdateEntry(context.Background(), attrEntry)
 		}
 	}
 
@@ -404,10 +405,13 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 	}
 
 	// Persist requested mode/owner if provided
-	if req.Mode != 0 {
-		if e, err := d.fs.repo.GetEntry(ctx, childPath); err == nil {
-			e.SetPosixMode(os.FileMode(req.Mode))
-			_ = d.fs.repo.UpdateEntry(context.Background(), e)
+	if req.Mode != 0 || req.Uid != 0 || req.Gid != 0 {
+		if attrEntry, err := d.fs.repo.GetEntry(ctx, childPath); err == nil {
+			if req.Mode != 0 {
+				attrEntry.SetPosixMode(os.FileMode(req.Mode))
+			}
+			attrEntry.SetPosixOwner(req.Uid, req.Gid)
+			_ = d.fs.repo.UpdateEntry(context.Background(), attrEntry)
 		}
 	}
 
@@ -665,8 +669,6 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 	a.Inode = PathToInode(f.path)
 	a.Mode = 0666
 	a.Nlink = 1
-	a.Uid = uint32(os.Getuid())
-	a.Gid = uint32(os.Getgid())
 	a.Valid = 1 * time.Second // Force attribute TTL to 1 second
 
 	// Get fresh entry from SQLite database
