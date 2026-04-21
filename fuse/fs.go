@@ -221,6 +221,7 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 	a.Nlink = 2
 	a.Uid = uint32(os.Getuid())
 	a.Gid = uint32(os.Getgid())
+	a.Valid = 1 * time.Second // Force attribute TTL to 1 second
 
 	// For root directory, use defaults
 	if d.path == "" {
@@ -228,6 +229,7 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 		a.Atime = time.Now()
 		a.Mtime = time.Now()
 		a.Ctime = time.Now()
+		a.Blocks = (a.Size + 511) / 512
 		return nil
 	}
 
@@ -263,6 +265,7 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 		a.Mode = os.ModeDir | mode
 	}
 
+	a.Blocks = (a.Size + 511) / 512
 	return nil
 }
 
@@ -399,9 +402,6 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 		stagingFile: stagingFile,
 		dirty:       false,
 	}
-
-	// Set response flags for direct I/O to avoid kernel caching issues
-	resp.Flags |= fuse.OpenDirectIO
 
 	// Persist requested mode/owner if provided
 	if req.Mode != 0 {
@@ -667,6 +667,7 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 	a.Nlink = 1
 	a.Uid = uint32(os.Getuid())
 	a.Gid = uint32(os.Getgid())
+	a.Valid = 1 * time.Second // Force attribute TTL to 1 second
 
 	// Get fresh entry from SQLite database
 	entry, err := f.fs.repo.GetEntry(ctx, f.path)
@@ -678,6 +679,7 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 				a.Atime = f.entry.ModTime
 				a.Mtime = f.entry.ModTime
 				a.Ctime = f.entry.ModTime
+				a.Blocks = (a.Size + 511) / 512
 				return nil
 			}
 			return syscall.ENOENT
@@ -703,6 +705,7 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 		a.Mode = mode
 	}
 
+	a.Blocks = (a.Size + 511) / 512
 	return nil
 }
 
@@ -841,9 +844,6 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 
 	handle.stagingPath = stagingPath
 	handle.stagingFile = stagingFile
-
-	// Use DirectIO to avoid kernel caching issues with our staging approach
-	resp.Flags |= fuse.OpenDirectIO
 
 	return handle, nil
 }
