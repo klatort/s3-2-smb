@@ -67,9 +67,6 @@ To share the actively mounted S3 bucket (`/mnt/s3`) with your Windows network:
 1. Configure Samba (`/etc/samba/smb.conf`):
 
 ```ini
-[global]
-    stat cache = no
-
 [s3share]
     path = /mnt/s3
     browseable = yes
