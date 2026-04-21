@@ -403,6 +403,9 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 		dirty:       false,
 	}
 
+	// Set response flags for direct I/O to avoid kernel caching issues
+	resp.Flags |= fuse.OpenDirectIO
+
 	// Persist requested mode/owner if provided
 	if req.Mode != 0 {
 		if e, err := d.fs.repo.GetEntry(ctx, childPath); err == nil {
@@ -687,7 +690,21 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 		return err
 	}
 
-	// Return attributes from DATABASE (crucial: NOT from S3)
+	// REAL-TIME S3 FETCHING FALLBACK FOR 0-BYTE ENTRIES
+	if entry.Size == 0 {
+		if s3Info, fetchErr := f.fs.s3.HeadObjectInfo(ctx, f.path); fetchErr == nil && s3Info.Size > 0 {
+			// S3 contains a real file, database cache is out of sync!
+			entry.Size = s3Info.Size
+			entry.ModTime = s3Info.LastModified
+			
+			// Auto-cure database in background
+			go func(e *metadata.FileEntry) {
+				_ = f.fs.repo.UpdateEntry(context.Background(), e)
+			}(entry)
+		}
+	}
+
+	// Return resolved attributes
 	a.Size = uint64(entry.Size)
 	a.Atime = entry.ModTime
 	a.Mtime = entry.ModTime
@@ -844,6 +861,9 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 
 	handle.stagingPath = stagingPath
 	handle.stagingFile = stagingFile
+
+	// Use DirectIO to avoid kernel caching issues with our staging approach
+	resp.Flags |= fuse.OpenDirectIO
 
 	return handle, nil
 }
