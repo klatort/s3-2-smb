@@ -403,9 +403,6 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 		dirty:       false,
 	}
 
-	// Set response flags for direct I/O to avoid kernel caching issues
-	resp.Flags |= fuse.OpenDirectIO
-
 	// Persist requested mode/owner if provided
 	if req.Mode != 0 {
 		if e, err := d.fs.repo.GetEntry(ctx, childPath); err == nil {
@@ -861,9 +858,6 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 
 	handle.stagingPath = stagingPath
 	handle.stagingFile = stagingFile
-
-	// Use DirectIO to avoid kernel caching issues with our staging approach
-	resp.Flags |= fuse.OpenDirectIO
 
 	return handle, nil
 }

@@ -1,4 +1,4 @@
-.PHONY: build clean install uninstall test update
+.PHONY: build clean install uninstall test update upgrade
 
 # Binary name
 BINARY=s3smb-gateway
@@ -39,6 +39,8 @@ install: build
 	-sudo systemctl daemon-reload 2>/dev/null || true
 	@echo "Starting service..."
 	-sudo systemctl enable --now s3smb-gateway 2>/dev/null || true
+	@echo "Flushing Samba internal caches..."
+	-sudo systemctl restart smbd 2>/dev/null || echo "Warning: Could not restart smbd"
 	@echo "Install complete! Binary is at /usr/local/bin/$(BINARY)"
 
 uninstall:
@@ -60,6 +62,8 @@ update:
 	else \
 		echo "Not a git repository. Cannot update automatically."; \
 	fi
+
+upgrade: update
 
 help:
 	@echo "Available targets:"
