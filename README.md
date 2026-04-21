@@ -55,6 +55,7 @@ When installed, a template config file is dropped at `/etc/s3smb-gateway/config.
 > **Note on Credentials:** The gateway uses standard AWS credential chains. You can set credentials via environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`), standard AWS profiles, or EC2/ECS IAM instance profiles.
 
 Restart the gateway after editing your configuration:
+
 ```bash
 sudo systemctl restart s3smb-gateway
 ```
@@ -64,6 +65,7 @@ sudo systemctl restart s3smb-gateway
 To share the actively mounted S3 bucket (`/mnt/s3`) with your Windows network:
 
 1. Configure Samba (`/etc/samba/smb.conf`):
+
 ```ini
 [global]
     stat cache = no
@@ -75,26 +77,21 @@ To share the actively mounted S3 bucket (`/mnt/s3`) with your Windows network:
     guest ok = no
     valid users = @smbusers
     
-    # Workarounds for S3 FUSE 0-byte read bug
     use sendfile = no
     strict locking = no
     oplocks = no
     level2 oplocks = no
     kernel oplocks = no
-    fake directory create times = yes
     dos filemode = yes
 
-    # Enable extended attributes for Windows ACLs
-    ea support = yes
+    vfs objects = acl_tdb
     store dos attributes = yes
     map acl inherit = yes
-    
-    # VFS objects for ACL support
-    vfs objects = acl_xattr
-    acl_xattr:ignore system acls = yes
+    acl_tdb:ignore system acls = yes
 ```
 
-2. Reload Samba:
+1. Reload Samba:
+
 ```bash
 sudo systemctl restart smbd
 ```
