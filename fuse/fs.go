@@ -159,8 +159,6 @@ func (f *FS) Mount() error {
 		fuse.Subtype("s3"),
 		fuse.AllowOther(),
 		fuse.DefaultPermissions(),
-		fuse.MaxReadahead(16 * 1024 * 1024), // 16MB readahead
-		fuse.AsyncRead(),
 	}
 
 	conn, err := fuse.Mount(f.cfg.MountPoint, opts...)

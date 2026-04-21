@@ -72,6 +72,13 @@ To share the actively mounted S3 bucket (`/mnt/s3`) with your Windows network:
     guest ok = no
     valid users = @smbusers
     
+    # Workarounds for S3 FUSE 0-byte read bug
+    use sendfile = no
+    strict locking = no
+    oplocks = no
+    level2 oplocks = no
+    kernel oplocks = no
+
     # Enable extended attributes for Windows ACLs
     ea support = yes
     store dos attributes = yes
