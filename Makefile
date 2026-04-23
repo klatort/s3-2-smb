@@ -24,21 +24,18 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 install: build
-	@echo "Stopping service if running..."
-	-sudo systemctl stop s3smb-gateway 2>/dev/null || true
-	-sudo systemctl stop s3smb-gateway@* 2>/dev/null || true
-	
 	@echo "Installing binary and configuration..."
 	sudo cp $(BUILD_DIR)/$(BINARY) /usr/local/bin/
 	sudo mkdir -p /etc/s3smb-gateway /var/cache/s3smb-gateway /var/lib/s3smb-gateway
 	sudo cp -n config.example.json /etc/s3smb-gateway/default.json || true
 	
 	@echo "Installing systemd template service..."
-	@printf "[Unit]\nDescription=S3SMB Gateway FUSE Filesystem (%%I)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStartPre=/bin/mkdir -p /var/cache/s3smb-gateway/%%i /var/lib/s3smb-gateway/%%i /mnt/s3/%%i\nExecStart=/usr/local/bin/s3smb-gateway -config /etc/s3smb-gateway/%%i.json -cache /var/cache/s3smb-gateway/%%i -db /var/lib/s3smb-gateway/%%i/metadata.db -mount /mnt/s3/%%i\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n" > $(BUILD_DIR)/s3smb-gateway@.service
+	@printf "[Unit]\nDescription=S3SMB Gateway FUSE Filesystem (%%I)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStartPre=/bin/mkdir -p /var/cache/s3smb-gateway/%%i /var/lib/s3smb-gateway/%%i /mnt/s3/%%i\nExecStart=/usr/local/bin/s3smb-gateway -config /etc/s3smb-gateway/%%i.json -cache /var/cache/s3smb-gateway/%%i -db /var/lib/s3smb-gateway/%%i/metadata.db -mount /mnt/s3/%%i -sync\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n" > $(BUILD_DIR)/s3smb-gateway@.service
 	sudo cp $(BUILD_DIR)/s3smb-gateway@.service /etc/systemd/system/
 	
 	-sudo systemctl daemon-reload 2>/dev/null || true
-	@echo "Starting default service..."
+	@echo "Restarting active services gracefully..."
+	-sudo systemctl try-restart "s3smb-gateway@*.service" 2>/dev/null || true
 	-sudo systemctl enable --now s3smb-gateway@default 2>/dev/null || true
 	@echo "Flushing Samba internal caches..."
 	-sudo systemctl restart smbd 2>/dev/null || echo "Warning: Could not restart smbd"

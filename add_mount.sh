@@ -1,0 +1,86 @@
+#!/bin/bash
+
+# add_mount.sh - Automated Deployment Script for S3SMB Gateway
+# Usage: ./add_mount.sh <bucket-name> [--prefix <prefix>] [--endpoint <url>] [--region <region>]
+
+set -e
+
+if [ -z "$1" ]; then
+    echo "Usage: $0 <bucket-name> [--prefix <prefix>] [--endpoint <url>] [--region <region>]"
+    echo "Example: $0 mybucket --region us-east-1"
+    exit 1
+fi
+
+MOUNT_NAME=$1
+shift
+
+PREFIX=""
+ENDPOINT=""
+REGION="us-east-1"
+
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --prefix) PREFIX="$2"; shift ;;
+        --endpoint) ENDPOINT="$2"; shift ;;
+        --region) REGION="$2"; shift ;;
+        *) echo "Unknown parameter passed: $1"; exit 1 ;;
+    esac
+    shift
+done
+
+JSON_CONFIG="/etc/s3smb-gateway/${MOUNT_NAME}.json"
+SMB_CONF="/etc/samba/smb.conf"
+MOUNT_PATH="/mnt/s3/${MOUNT_NAME}"
+
+echo "Deploying S3SMB Mount: ${MOUNT_NAME}..."
+
+# 1. Generate configuration file if it doesn't exist
+if [ ! -f "$JSON_CONFIG" ]; then
+    echo "Configuration file ${JSON_CONFIG} does not exist. Generating natively..."
+    mkdir -p /etc/s3smb-gateway
+    cat > "$JSON_CONFIG" <<EOF
+{
+  "s3": {
+    "bucket": "${MOUNT_NAME}",
+    "region": "${REGION}",
+    "endpoint": "${ENDPOINT}",
+    "profile": "",
+    "prefix": "${PREFIX}"
+  },
+  "mount_point": "${MOUNT_PATH}",
+  "cache_dir": "/var/cache/s3smb-gateway/${MOUNT_NAME}",
+  "db_path": "/var/lib/s3smb-gateway/${MOUNT_NAME}/metadata.db",
+  "chunk_size": 16777216,
+  "max_cache_size": 10737418240,
+  "debug": false
+}
+EOF
+    echo "Successfully created configuration at ${JSON_CONFIG}"
+else
+    echo "Configuration file ${JSON_CONFIG} already exists. Using existing configuration."
+fi
+
+# 2. Inject Samba configuration if not present
+echo "Configuring Samba share [${MOUNT_NAME}]..."
+if ! grep -q "^\[${MOUNT_NAME}\]" "$SMB_CONF"; then
+    echo -e "\n[${MOUNT_NAME}]\n   path = ${MOUNT_PATH}\n   read only = no\n   guest ok = yes\n   force user = root\n   vfs objects = catia fruit streams_xattr\n   ea support = yes\n" >> "$SMB_CONF"
+    echo "Successfully injected Samba configuration."
+else
+    echo "Samba block [${MOUNT_NAME}] already exists. Skipping injection."
+fi
+
+# 3. Reload Systemd and Enable the specific instance
+echo "Reloading systemd daemons..."
+systemctl daemon-reload
+
+echo "Enabling and Starting s3smb-gateway@${MOUNT_NAME}..."
+systemctl enable --now "s3smb-gateway@${MOUNT_NAME}"
+
+# 4. Reload Samba
+echo "Restarting Samba daemon..."
+systemctl restart smbd
+
+echo "--------------------------------------------------------"
+echo "Deployment Complete!"
+echo "Your new S3 bucket placeholder metadata is syncing natively."
+echo "You can access the share via: \\\\<your-server-ip>\\${MOUNT_NAME}"

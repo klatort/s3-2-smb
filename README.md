@@ -53,60 +53,39 @@ When installed, a default config file is dropped at `/etc/s3smb-gateway/default.
 
 > **Note on Credentials:** The gateway uses standard AWS credential chains. You can set credentials via environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`), standard AWS profiles, or EC2/ECS IAM instance profiles.
 
-Restart or start the specific gateway instance after creating or editing your configuration:
+## 🚀 Automated Mount Provisioning (Recommended)
+
+To eliminate the hassle of manually adjusting Samba configuration blocks and creating configuration datasets by hand, we've provided a simple deployment automation script!
+
+Just run the deployment script with your target bucket and optional AWS routing flags:
 
 ```bash
-# Starts the gateway associated with /etc/s3smb-gateway/bucketA.json
-sudo systemctl enable --now s3smb-gateway@bucketA
+chmod +x ./add_mount.sh
 
-# Restarts the default gateway
-sudo systemctl restart s3smb-gateway@default
+# Simple Deployment (Generates bucket config natively)
+sudo ./add_mount.sh mybucket
+
+# Advanced Deployment using Sub-folders and Custom Endpoints
+sudo ./add_mount.sh bucketB --prefix "media/videos/" --region "us-west-2" --endpoint "http://minio.local:9000"
 ```
 
-### Directory Structure Generated
-For an instance named `mybucket`, the system will automatically create and use:
-- Mount point: `/mnt/s3/mybucket`
-- Local Cache: `/var/cache/s3smb-gateway/mybucket`
-- Metadata DB: `/var/lib/s3smb-gateway/mybucket/metadata.db`
+The script will automatically securely generate `/etc/s3smb-gateway/mybucket.json` for you, inject `[mybucket]` directly into your `/etc/samba/smb.conf`, configure your FUSE systemd template natively, and start the cache engine instantly without dropping connections to your other running S3 shares!
 
-## Samba Integration
+### Manual Integration
 
-To share the actively mounted S3 buckets (`/mnt/s3/default`, `/mnt/s3/bucketA`, etc.) with your Windows network:
-
-1. Configure Samba (`/etc/samba/smb.conf`) for each share:
+If you prefer to configure manually or advanced ACL tuning is required, you can create the Samba entries in `/etc/samba/smb.conf` manually:
 
 ```ini
-[defaultShare]
-    path = /mnt/s3/default
+[mybucket]
+    path = /mnt/s3/mybucket
     browseable = yes
     read only = no
-    guest ok = no
-    valid users = @smbusers
-    
-    use sendfile = no
-    strict locking = no
-    oplocks = no
-    level2 oplocks = no
-    kernel oplocks = no
-    dos filemode = yes
-
-    vfs objects = acl_tdb
-    store dos attributes = yes
-    map acl inherit = yes
-    acl_tdb:ignore system acls = yes
-
-[bucketA]
-    path = /mnt/s3/bucketA
-    browseable = yes
-    read only = no
-    guest ok = no
-    valid users = @smbusers
-    # ... duplicate settings as above ...
+    guest ok = yes
 ```
 
-1. Reload Samba:
-
+Then start the gateway manually:
 ```bash
+sudo systemctl enable --now s3smb-gateway@mybucket
 sudo systemctl restart smbd
 ```
 
