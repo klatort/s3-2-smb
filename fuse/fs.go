@@ -793,73 +793,79 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 		dirty: false,
 	}
 
-	// Always create a staging file for both read and write operations
-	// This ensures we have local data to read from
+	// Always create a staging file for write operations
+	// For read-only operations, we skip this to allow ChunkManager lazy-loading
 	stagingPath := f.fs.pathToStagingFile(f.path)
 
-	// Ensure staging directory exists
-	if err := os.MkdirAll(f.fs.stagingDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create staging directory %s: %w", f.fs.stagingDir, err)
-	}
+	// Check if this is a write operation
+	isWrite := req.Flags.IsWriteOnly() || req.Flags.IsReadWrite()
 
-	// Check if file exists in S3 and has content
-	// We need to download the content for both read and write operations
-	if f.entry != nil && f.entry.Size > 0 {
-		// Download existing content to staging file for both read and write operations
-		reader, _, err := f.fs.s3.GetObject(ctx, f.path)
-		if err == nil && reader != nil {
-			defer reader.Close()
-			// Create or truncate the staging file
-			stagingFile, err := os.Create(stagingPath)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create staging file: %w", err)
-			}
-			defer stagingFile.Close()
-			
-			// Stream content from S3 to file
-			_, err = io.Copy(stagingFile, reader)
-			if err != nil {
-				// Clean up the partially written file
-				os.Remove(stagingPath)
-				return nil, fmt.Errorf("failed to download file content: %w", err)
-			}
-		} else if err != nil {
-			// Check if this is a "not found" error (file doesn't exist in S3)
-			errStr := err.Error()
-			if strings.Contains(errStr, "NoSuchKey") || strings.Contains(errStr, "NotFound") {
-				// File doesn't exist in S3 (might be newly created or deleted)
-				// Create empty staging file
-				if err := os.WriteFile(stagingPath, []byte{}, 0644); err != nil {
-					return nil, fmt.Errorf("failed to create empty staging file: %w", err)
-				}
-				log.Debug("File %s not found in S3, creating empty staging file\n", f.path)
-			} else {
-				// Other error (network, permissions, etc.)
-				log.Warn("Failed to download file %s from S3: %v", f.path, err)
-				// Don't fail open - create empty staging file and let read handle the error
-				// This allows opening files even when S3 is temporarily unavailable
-				if err := os.WriteFile(stagingPath, []byte{}, 0644); err != nil {
+	if isWrite {
+		// Ensure staging directory exists
+		if err := os.MkdirAll(f.fs.stagingDir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create staging directory %s: %w", f.fs.stagingDir, err)
+		}
+
+		// Check if file exists in S3 and has content
+		// We need to download the content to stage the write operation safely
+		if f.entry != nil && f.entry.Size > 0 {
+			// Download existing content to staging file for write operations
+			reader, _, err := f.fs.s3.GetObject(ctx, f.path)
+			if err == nil && reader != nil {
+				defer reader.Close()
+				// Create or truncate the staging file
+				stagingFile, err := os.Create(stagingPath)
+				if err != nil {
 					return nil, fmt.Errorf("failed to create staging file: %w", err)
+				}
+				defer stagingFile.Close()
+				
+				// Stream content from S3 to file
+				_, err = io.Copy(stagingFile, reader)
+				if err != nil {
+					// Clean up the partially written file
+					os.Remove(stagingPath)
+					return nil, fmt.Errorf("failed to download file content: %w", err)
+				}
+			} else if err != nil {
+				// Check if this is a "not found" error (file doesn't exist in S3)
+				errStr := err.Error()
+				if strings.Contains(errStr, "NoSuchKey") || strings.Contains(errStr, "NotFound") {
+					// File doesn't exist in S3 (might be newly created or deleted)
+					// Create empty staging file
+					if err := os.WriteFile(stagingPath, []byte{}, 0644); err != nil {
+						return nil, fmt.Errorf("failed to create empty staging file: %w", err)
+					}
+					log.Debug("File %s not found in S3, creating empty staging file\n", f.path)
+				} else {
+					// Other error (network, permissions, etc.)
+					log.Warn("Failed to download file %s from S3: %v", f.path, err)
+					// Don't fail open - create empty staging file and let read handle the error
+					// This allows opening files even when S3 is temporarily unavailable
+					if err := os.WriteFile(stagingPath, []byte{}, 0644); err != nil {
+						return nil, fmt.Errorf("failed to create staging file: %w", err)
+					}
 				}
 			}
 		}
-	}
 
-	// Determine file open mode
-	// Always use O_CREATE to ensure staging file exists
-	flags := os.O_RDONLY | os.O_CREATE
-	if req.Flags.IsWriteOnly() || req.Flags.IsReadWrite() {
-		flags = os.O_RDWR | os.O_CREATE
-	}
+		// Determine file open mode
+		flags := os.O_RDWR | os.O_CREATE
 
-	// Open or create the staging file
-	stagingFile, err := os.OpenFile(stagingPath, flags, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open staging file: %w", err)
-	}
+		// Open or create the staging file
+		stagingFile, err := os.OpenFile(stagingPath, flags, 0644)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open staging file: %w", err)
+		}
 
-	handle.stagingPath = stagingPath
-	handle.stagingFile = stagingFile
+		handle.stagingPath = stagingPath
+		handle.stagingFile = stagingFile
+	} else {
+		// For read-only operations, we rely strictly on the ChunkManager!
+		// No staging file is kept open or downloaded.
+		handle.stagingPath = ""
+		handle.stagingFile = nil
+	}
 
 	return handle, nil
 }
