@@ -96,51 +96,43 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 // LoadCredentialsFromEnv loads S3 credentials from environment variables
-// This is the recommended secure method for providing credentials
-// Supported environment variables:
-//   - AWS_ACCESS_KEY_ID / S3_ACCESS_KEY
-//   - AWS_SECRET_ACCESS_KEY / S3_SECRET_KEY
-//   - AWS_PROFILE / S3_PROFILE
-//   - AWS_REGION / S3_REGION (overrides config)
-//   - S3_BUCKET (overrides config)
-//   - S3_ENDPOINT (overrides config)
 func (c *Config) LoadCredentialsFromEnv() {
 	// Access Key (AWS standard or custom)
 	if key := os.Getenv("AWS_ACCESS_KEY_ID"); key != "" {
-		c.S3.AccessKey = key
+		c.S3.AccessKey = strings.TrimSpace(key)
 	} else if key := os.Getenv("S3_ACCESS_KEY"); key != "" {
-		c.S3.AccessKey = key
+		c.S3.AccessKey = strings.TrimSpace(key)
 	}
 
 	// Secret Key (AWS standard or custom)
 	if key := os.Getenv("AWS_SECRET_ACCESS_KEY"); key != "" {
-		c.S3.SecretKey = key
+		c.S3.SecretKey = strings.TrimSpace(key)
 	} else if key := os.Getenv("S3_SECRET_KEY"); key != "" {
-		c.S3.SecretKey = key
+		c.S3.SecretKey = strings.TrimSpace(key)
 	}
 
 	// Profile (AWS standard or custom)
 	if profile := os.Getenv("AWS_PROFILE"); profile != "" {
-		c.S3.Profile = profile
+		c.S3.Profile = strings.TrimSpace(profile)
 	} else if profile := os.Getenv("S3_PROFILE"); profile != "" {
-		c.S3.Profile = profile
+		c.S3.Profile = strings.TrimSpace(profile)
 	}
 
 	// Region override
 	if region := os.Getenv("AWS_REGION"); region != "" {
-		c.S3.Region = region
+		c.S3.Region = strings.TrimSpace(region)
 	} else if region := os.Getenv("S3_REGION"); region != "" {
-		c.S3.Region = region
+		c.S3.Region = strings.TrimSpace(region)
 	}
 
 	// Bucket override
 	if bucket := os.Getenv("S3_BUCKET"); bucket != "" {
-		c.S3.Bucket = bucket
+		c.S3.Bucket = strings.TrimSpace(bucket)
 	}
 
 	// Endpoint override
 	if endpoint := os.Getenv("S3_ENDPOINT"); endpoint != "" {
-		c.S3.Endpoint = endpoint
+		c.S3.Endpoint = strings.TrimSpace(endpoint)
 	}
 }
 
