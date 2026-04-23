@@ -17,22 +17,24 @@ A FUSE-based filesystem that mounts an S3 bucket as a local folder on Linux, des
 
 ## Deployment (Simplified)
 
-Using the included Makefile, deployment and daemon management is fully automated. This will build the application, distribute configurations, configure systemd, and start the background service immediately:
+Using the included Makefile, deployment and daemon management is fully automated. This will build the application, distribute configurations, configure systemd, and start the default background service immediately:
 
 ```bash
-# Install dependencies, compile, setup systemd, and start the service
+# Install dependencies, compile, setup the systemd template, and start the 'default' service
 make install
 
 # To later update from Git and gracefully redeploy
 make update
 
-# To stop the service and remove the tool completely
+# To stop all services and remove the tool completely
 make uninstall
 ```
 
-## Configuration
+## Configuration & Mounting Multiple Buckets
 
-When installed, a template config file is dropped at `/etc/s3smb-gateway/config.json`. Update it with your S3 credentials and restart the service:
+The deployment uses a **systemd template unit** (`s3smb-gateway@.service`), which dynamically provisions isolated caches, databases, and mount points based on the configuration name. This means you can run an unlimited number of buckets natively.
+
+When installed, a default config file is dropped at `/etc/s3smb-gateway/default.json`. You can create as many configurations as you want in `/etc/s3smb-gateway/` (e.g., `bucketA.json`, `bucketB.json`). Do not worry about specifying paths within the configuration—the template automatically injects strict directories!
 
 ```json
 {
@@ -43,9 +45,6 @@ When installed, a template config file is dropped at `/etc/s3smb-gateway/config.
     "profile": "",
     "prefix": ""
   },
-  "mount_point": "/mnt/s3",
-  "cache_dir": "/var/cache/s3smb-gateway",
-  "db_path": "/var/lib/s3smb-gateway/metadata.db",
   "chunk_size": 16777216,
   "max_cache_size": 10737418240,
   "debug": false
@@ -54,21 +53,31 @@ When installed, a template config file is dropped at `/etc/s3smb-gateway/config.
 
 > **Note on Credentials:** The gateway uses standard AWS credential chains. You can set credentials via environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`), standard AWS profiles, or EC2/ECS IAM instance profiles.
 
-Restart the gateway after editing your configuration:
+Restart or start the specific gateway instance after creating or editing your configuration:
 
 ```bash
-sudo systemctl restart s3smb-gateway
+# Starts the gateway associated with /etc/s3smb-gateway/bucketA.json
+sudo systemctl enable --now s3smb-gateway@bucketA
+
+# Restarts the default gateway
+sudo systemctl restart s3smb-gateway@default
 ```
+
+### Directory Structure Generated
+For an instance named `mybucket`, the system will automatically create and use:
+- Mount point: `/mnt/s3/mybucket`
+- Local Cache: `/var/cache/s3smb-gateway/mybucket`
+- Metadata DB: `/var/lib/s3smb-gateway/mybucket/metadata.db`
 
 ## Samba Integration
 
-To share the actively mounted S3 bucket (`/mnt/s3`) with your Windows network:
+To share the actively mounted S3 buckets (`/mnt/s3/default`, `/mnt/s3/bucketA`, etc.) with your Windows network:
 
-1. Configure Samba (`/etc/samba/smb.conf`):
+1. Configure Samba (`/etc/samba/smb.conf`) for each share:
 
 ```ini
-[s3share]
-    path = /mnt/s3
+[defaultShare]
+    path = /mnt/s3/default
     browseable = yes
     read only = no
     guest ok = no
@@ -85,6 +94,14 @@ To share the actively mounted S3 bucket (`/mnt/s3`) with your Windows network:
     store dos attributes = yes
     map acl inherit = yes
     acl_tdb:ignore system acls = yes
+
+[bucketA]
+    path = /mnt/s3/bucketA
+    browseable = yes
+    read only = no
+    guest ok = no
+    valid users = @smbusers
+    # ... duplicate settings as above ...
 ```
 
 1. Reload Samba:
