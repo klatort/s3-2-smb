@@ -131,20 +131,23 @@ func run(cfg *config.Config, syncOnStart bool) error {
 		log.Info("S3 connection verified")
 	}
 
-	// Sync S3 contents if requested (populate metadata from S3)
+	// Sync S3 contents if requested (populate metadata from S3 in background)
 	if syncOnStart {
-		log.Info("Syncing S3 bucket contents to metadata database...")
-		syncOpts := metadata.DefaultSyncOptions()
-		syncOpts.OnProgress = func(synced int, inProgress bool) {
-			if inProgress && synced > 0 && synced%100 == 0 {
-				log.Info("  Synced %d entries...", synced)
+		log.Info("Starting background sync of S3 bucket to metadata database...")
+		
+		go func() {
+			syncOpts := metadata.DefaultSyncOptions()
+			syncOpts.OnProgress = func(synced int, inProgress bool) {
+				if inProgress && synced > 0 && synced%100 == 0 {
+					log.Info("  Synced %d entries...", synced)
+				}
 			}
-		}
-		if err := metadata.SyncFromS3(ctx, repo, s3Client, cfg.S3.Bucket, syncOpts); err != nil {
-			log.Warn("Sync failed: %v", err)
-		} else {
-			log.Info("Sync complete")
-		}
+			if err := metadata.SyncFromS3(ctx, repo, s3Client, cfg.S3.Bucket, syncOpts); err != nil {
+				log.Warn("Sync failed: %v", err)
+			} else {
+				log.Info("Sync complete")
+			}
+		}()
 	}
 
 	// Create filesystem with metadata repository

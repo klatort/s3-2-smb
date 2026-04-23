@@ -25,6 +25,7 @@ clean:
 
 install: build
 	@echo "Installing binary and configuration..."
+	sudo rm -f /usr/local/bin/$(BINARY)
 	sudo cp $(BUILD_DIR)/$(BINARY) /usr/local/bin/
 	sudo mkdir -p /etc/s3smb-gateway /var/cache/s3smb-gateway /var/lib/s3smb-gateway
 	sudo cp -n config.example.json /etc/s3smb-gateway/default.json || true

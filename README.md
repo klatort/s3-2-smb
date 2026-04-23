@@ -71,6 +71,17 @@ sudo ./add_mount.sh bucketB --prefix "media/videos/" --region "us-west-2" --endp
 
 The script will automatically securely generate `/etc/s3smb-gateway/mybucket.json` for you, inject `[mybucket]` directly into your `/etc/samba/smb.conf`, configure your FUSE systemd template natively, and start the cache engine instantly without dropping connections to your other running S3 shares!
 
+### 🧹 Automated Mount Cleanup
+
+To safely orchestrate the absolute removal of a compromised, obsolete, or poorly configured mount:
+
+```bash
+chmod +x ./remove_mount.sh
+sudo ./remove_mount.sh badbucket
+```
+
+This ensures the Samba node logic, active hooks, and daemon binds are all definitively neutralized safely.
+
 ### Manual Integration
 
 If you prefer to configure manually or advanced ACL tuning is required, you can create the Samba entries in `/etc/samba/smb.conf` manually:
