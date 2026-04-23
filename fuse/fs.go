@@ -806,48 +806,9 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 			return nil, fmt.Errorf("failed to create staging directory %s: %w", f.fs.stagingDir, err)
 		}
 
-		// Check if file exists in S3 and has content
-		// We need to download the content to stage the write operation safely
-		if f.entry != nil && f.entry.Size > 0 {
-			// Download existing content to staging file for write operations
-			reader, _, err := f.fs.s3.GetObject(ctx, f.path)
-			if err == nil && reader != nil {
-				defer reader.Close()
-				// Create or truncate the staging file
-				stagingFile, err := os.Create(stagingPath)
-				if err != nil {
-					return nil, fmt.Errorf("failed to create staging file: %w", err)
-				}
-				defer stagingFile.Close()
-				
-				// Stream content from S3 to file
-				_, err = io.Copy(stagingFile, reader)
-				if err != nil {
-					// Clean up the partially written file
-					os.Remove(stagingPath)
-					return nil, fmt.Errorf("failed to download file content: %w", err)
-				}
-			} else if err != nil {
-				// Check if this is a "not found" error (file doesn't exist in S3)
-				errStr := err.Error()
-				if strings.Contains(errStr, "NoSuchKey") || strings.Contains(errStr, "NotFound") {
-					// File doesn't exist in S3 (might be newly created or deleted)
-					// Create empty staging file
-					if err := os.WriteFile(stagingPath, []byte{}, 0644); err != nil {
-						return nil, fmt.Errorf("failed to create empty staging file: %w", err)
-					}
-					log.Debug("File %s not found in S3, creating empty staging file\n", f.path)
-				} else {
-					// Other error (network, permissions, etc.)
-					log.Warn("Failed to download file %s from S3: %v", f.path, err)
-					// Don't fail open - create empty staging file and let read handle the error
-					// This allows opening files even when S3 is temporarily unavailable
-					if err := os.WriteFile(stagingPath, []byte{}, 0644); err != nil {
-						return nil, fmt.Errorf("failed to create staging file: %w", err)
-					}
-				}
-			}
-		}
+		// We strictly DO NOT download from S3 here to prevent Windows Explorer 
+		// metadata reads (O_RDWR) from freezing the gateway!
+		// The S3 object is lazily staged on the very first Write() hook.
 
 		// Determine file open mode
 		flags := os.O_RDWR | os.O_CREATE
@@ -975,20 +936,7 @@ func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse
 		return nil
 	}
 
-	// If staging file exists (read-write mode), read from it
-	if h.stagingFile != nil {
-		buf := make([]byte, req.Size)
-		n, err := h.stagingFile.ReadAt(buf, req.Offset)
-		if err != nil && err != io.EOF {
-			// Fall through to S3 read
-			if h.file.fs.cfg.Debug {
-				log.Debug("Failed to read from staging file for %s: %v\n", h.file.path, err)
-			}
-		} else if n > 0 {
-			resp.Data = buf[:n]
-			return nil
-		}
-	}
+
 
 	// Otherwise, read from S3 (lazy loading)
 	s3Key := h.file.path
@@ -1053,6 +1001,21 @@ func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fu
 
 	if h.stagingFile == nil {
 		return syscall.EIO
+	}
+
+	// First time modifying the file: securely fetch original S3 payload into staging file
+	if !h.dirty && h.file.entry != nil && h.file.entry.Size > 0 {
+		reader, _, err := h.file.fs.s3.GetObject(ctx, h.file.path)
+		if err == nil && reader != nil {
+			defer reader.Close()
+			h.stagingFile.Seek(0, io.SeekStart)
+			io.Copy(h.stagingFile, reader)
+		} else if err != nil {
+			errStr := err.Error()
+			if !strings.Contains(errStr, "NoSuchKey") && !strings.Contains(errStr, "NotFound") {
+				log.Warn("Lazy stage logic failed to fetch %s before write: %v", h.file.path, err)
+			}
+		}
 	}
 
 	// Write to the staging file at the specified offset
