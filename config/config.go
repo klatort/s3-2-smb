@@ -90,7 +90,21 @@ func LoadConfig(path string) (*Config, error) {
 		cfg.ChunkSize = ChunkSize
 	}
 
-	// Load credentials from environment variables (secure method)
+	// Hard-parse the corresponding .env file directly (bypassing Systemd backwards compatibility limitations)
+	envPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".env"
+	if envData, err := os.ReadFile(envPath); err == nil {
+		lines := strings.Split(string(envData), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "AWS_ACCESS_KEY_ID=") {
+				cfg.S3.AccessKey = strings.TrimPrefix(line, "AWS_ACCESS_KEY_ID=")
+			} else if strings.HasPrefix(line, "AWS_SECRET_ACCESS_KEY=") {
+				cfg.S3.SecretKey = strings.TrimPrefix(line, "AWS_SECRET_ACCESS_KEY=")
+			}
+		}
+	}
+
+	// Load credentials from environment variables as secondary override
 	cfg.LoadCredentialsFromEnv()
 
 	return cfg, nil

@@ -41,8 +41,8 @@ echo "Restarting Samba daemon to sever active associations..."
 systemctl restart smbd
 
 # 4. Optional Storage Cleanup
-echo "The configuration file ${JSON_CONFIG} has been retained for your safety."
-echo "If you wish to fully delete the configuration and its sqlite caches entirely, run:"
-echo "sudo rm ${JSON_CONFIG} && sudo rm -rf /var/cache/s3smb-gateway/${MOUNT_NAME} /var/lib/s3smb-gateway/${MOUNT_NAME}"
+echo "The configuration files have been retained for your safety."
+echo "If you wish to fully delete the configurations and its sqlite caches entirely, run:"
+echo "sudo rm ${JSON_CONFIG} /etc/s3smb-gateway/${MOUNT_NAME}.env && sudo rm -rf /var/cache/s3smb-gateway/${MOUNT_NAME} /var/lib/s3smb-gateway/${MOUNT_NAME}"
 echo "--------------------------------------------------------"
 echo "Cleanup Complete! The corrupted or old mount has been completely neutralized."
