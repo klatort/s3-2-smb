@@ -316,6 +316,9 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 
 	// Add children from database
 	for _, child := range children {
+		if child.Path == d.path || child.Path == "" {
+			continue // Skip adding the parent directory or root itself to avoid corrupting Dirent strings
+		}
 		entryType := fuse.DT_File
 		if child.IsDir {
 			entryType = fuse.DT_Dir

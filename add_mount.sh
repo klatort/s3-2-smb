@@ -17,18 +17,23 @@ shift
 PREFIX=""
 ENDPOINT=""
 REGION="us-east-1"
+ACCESS_KEY=""
+SECRET_KEY=""
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --prefix) PREFIX="$2"; shift ;;
         --endpoint) ENDPOINT="$2"; shift ;;
         --region) REGION="$2"; shift ;;
+        --access-key) ACCESS_KEY="$2"; shift ;;
+        --secret-key) SECRET_KEY="$2"; shift ;;
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
     esac
     shift
 done
 
 JSON_CONFIG="/etc/s3smb-gateway/${MOUNT_NAME}.json"
+ENV_FILE="/etc/s3smb-gateway/${MOUNT_NAME}.env"
 SMB_CONF="/etc/samba/smb.conf"
 MOUNT_PATH="/mnt/s3/${MOUNT_NAME}"
 
@@ -58,6 +63,18 @@ EOF
     echo "Successfully created configuration at ${JSON_CONFIG}"
 else
     echo "Configuration file ${JSON_CONFIG} already exists. Using existing configuration."
+fi
+
+# 1.5 Generate Environment file securely
+if [ -n "$ACCESS_KEY" ] || [ -n "$SECRET_KEY" ]; then
+    echo "Securing AWS credentials natively into ${ENV_FILE}..."
+    cat > "$ENV_FILE" <<EOF
+AWS_ACCESS_KEY_ID=${ACCESS_KEY}
+AWS_SECRET_ACCESS_KEY=${SECRET_KEY}
+EOF
+    chmod 600 "$ENV_FILE"
+else
+    echo "No explicit credentials provided. Gateway will attempt to use fallback System/EC2 profiles."
 fi
 
 # 2. Inject Samba configuration if not present

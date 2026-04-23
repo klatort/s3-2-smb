@@ -137,6 +137,7 @@ func run(cfg *config.Config, syncOnStart bool) error {
 		
 		go func() {
 			syncOpts := metadata.DefaultSyncOptions()
+			syncOpts.Prefix = cfg.S3.Prefix
 			syncOpts.OnProgress = func(synced int, inProgress bool) {
 				if inProgress && synced > 0 && synced%100 == 0 {
 					log.Info("  Synced %d entries...", synced)

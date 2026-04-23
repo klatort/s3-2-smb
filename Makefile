@@ -31,7 +31,7 @@ install: build
 	sudo cp -n config.example.json /etc/s3smb-gateway/default.json || true
 	
 	@echo "Installing systemd template service..."
-	@printf "[Unit]\nDescription=S3SMB Gateway FUSE Filesystem (%%I)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStartPre=/bin/mkdir -p /var/cache/s3smb-gateway/%%i /var/lib/s3smb-gateway/%%i /mnt/s3/%%i\nExecStart=/usr/local/bin/s3smb-gateway -config /etc/s3smb-gateway/%%i.json -cache /var/cache/s3smb-gateway/%%i -db /var/lib/s3smb-gateway/%%i/metadata.db -mount /mnt/s3/%%i -sync\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n" > $(BUILD_DIR)/s3smb-gateway@.service
+	@printf "[Unit]\nDescription=S3SMB Gateway FUSE Filesystem (%%I)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nEnvironmentFile=-/etc/s3smb-gateway/%%i.env\nExecStartPre=/bin/mkdir -p /var/cache/s3smb-gateway/%%i /var/lib/s3smb-gateway/%%i /mnt/s3/%%i\nExecStart=/usr/local/bin/s3smb-gateway -config /etc/s3smb-gateway/%%i.json -cache /var/cache/s3smb-gateway/%%i -db /var/lib/s3smb-gateway/%%i/metadata.db -mount /mnt/s3/%%i -sync\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n" > $(BUILD_DIR)/s3smb-gateway@.service
 	sudo cp $(BUILD_DIR)/s3smb-gateway@.service /etc/systemd/system/
 	
 	-sudo systemctl daemon-reload 2>/dev/null || true
