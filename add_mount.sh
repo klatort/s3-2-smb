@@ -20,9 +20,11 @@ REGION="us-east-1"
 ACCESS_KEY=""
 SECRET_KEY=""
 BUCKET_NAME="${MOUNT_NAME}"
+SHARE_NAME="${MOUNT_NAME}"
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
+        --share-name) SHARE_NAME="$2"; shift ;;
         --bucket) BUCKET_NAME="$2"; shift ;;
         --prefix) PREFIX="$2"; shift ;;
         --endpoint) ENDPOINT="$2"; shift ;;
@@ -80,12 +82,12 @@ else
 fi
 
 # 2. Inject Samba configuration if not present
-echo "Configuring Samba share [${MOUNT_NAME}]..."
-if ! grep -q "^\[${MOUNT_NAME}\]" "$SMB_CONF"; then
-    echo -e "\n[${MOUNT_NAME}]\n   path = ${MOUNT_PATH}\n   read only = no\n   guest ok = yes\n   force user = root\n   vfs objects = catia fruit streams_xattr\n   ea support = yes\n" >> "$SMB_CONF"
+echo "Configuring Samba share [${SHARE_NAME}]..."
+if ! grep -q "^\[${SHARE_NAME}\]" "$SMB_CONF"; then
+    echo -e "\n[${SHARE_NAME}]\n   path = ${MOUNT_PATH}\n   read only = no\n   guest ok = yes\n   force user = root\n   vfs objects = catia fruit streams_xattr\n   ea support = yes\n" >> "$SMB_CONF"
     echo "Successfully injected Samba configuration."
 else
-    echo "Samba block [${MOUNT_NAME}] already exists. Skipping injection."
+    echo "Samba block [${SHARE_NAME}] already exists. Skipping injection."
 fi
 
 # 3. Reload Systemd and Enable the specific instance
