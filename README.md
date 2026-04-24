@@ -67,6 +67,7 @@ sudo ./add_mount.sh mybucket
 
 # Advanced Deployment using decoupled target buckets, Sub-folders and Custom Endpoints
 sudo ./add_mount.sh marketing_share \
+   --share-name "marketing share public" \
    --bucket "obs-marketing-prod-2024" \
    --region cn-north-4 \
    --endpoint "obs.cn-north-4.myhuaweicloud.com" \
@@ -84,6 +85,9 @@ To safely orchestrate the absolute removal of a compromised, obsolete, or poorly
 ```bash
 chmod +x ./remove_mount.sh
 sudo ./remove_mount.sh badbucket
+
+# Or if you used a custom decoupled Share Name:
+sudo ./remove_mount.sh marketing_share --share-name "marketing share public"
 ```
 
 This ensures the Samba node logic, active hooks, and daemon binds are all definitively neutralized safely.
