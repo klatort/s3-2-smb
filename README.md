@@ -1,13 +1,13 @@
 # S3SMB-Gateway
 
-A FUSE-based filesystem that mounts an S3 bucket as a local folder on Linux, designed to be shared via Samba to Windows clients.
+A FUSE-based filesystem that mounts an S3 bucket as a local folder on Linux, designed to be shared via Samba to Windows clients dynamically.
 
-## Features
+## Architecture & Features
 
-- **Metadata Caching**: File metadata and Windows ACLs (xattrs) are stored locally in SQLite, avoiding S3 API limits for directory listings.
-- **Lazy Loading & Chunking**: File bytes are downloaded on-demand in 16MB chunks.
-- **Upload-on-Close**: Writes are buffered locally and pushed to S3 when the file is closed.
-- **Extended Attributes**: Native xattr support inherently enables Windows ACL preservation via Samba.
+- **Asynchronous SQLite Metadata Sync**: File metadata and Windows ACLs (xattrs) are stored locally in a highly concurrent SQLite `WAL` database. Directory listings are served instantly from the database without invoking standard rate limits from AWS API `ListObjects` queries.
+- **Background Provisioning**: The Gateway natively syncs the S3 bucket lazily in the background while the OS mounts the filesystem immediately at boot.
+- **Lazy Zero-copy Staging**: Files are only resolved and pulled down natively strictly when they are forcefully requested or opened for `Write` operations, bypassing expensive eager-fetches.
+- **Extended Attributes**: Native xattr support inherently enables Windows ACL preservation natively through Samba.
 
 ## Requirements
 
@@ -17,24 +17,24 @@ A FUSE-based filesystem that mounts an S3 bucket as a local folder on Linux, des
 
 ## Deployment (Simplified)
 
-Using the included Makefile, deployment and daemon management is fully automated. This will build the application, distribute configurations, configure systemd, and start the default background service immediately:
+Using the included Makefile, deployment and daemon management is fully automated. This will build the application, distribute configurations, configure systemd, and prepare the core orchestration logic:
 
 ```bash
-# Install dependencies, compile, setup the systemd template, and start the 'default' service
+# Install dependencies, compile core binaries, and orchestrate the unit templates
 make install
 
-# To later update from Git and gracefully redeploy
+# To seamlessly force update binaries from Git and gracefully redeploy
 make update
 
-# To stop all services and remove the tool completely
+# To instantly halt all deployed mounts globally and erase the tools entirely
 make uninstall
 ```
 
 ## Configuration & Mounting Multiple Buckets
 
-The deployment uses a **systemd template unit** (`s3smb-gateway@.service`), which dynamically provisions isolated caches, databases, and mount points based on the configuration name. This means you can run an unlimited number of buckets natively.
+The deployment uses a **systemd template unit** (`s3smb-gateway@.service`), which dynamically isolates caches, databases, and mount points precisely based on the configuration name. This allows you to run an unlimited number of buckets completely independently.
 
-When installed, a default config file is dropped at `/etc/s3smb-gateway/default.json`. You can create as many configurations as you want in `/etc/s3smb-gateway/` (e.g., `bucketA.json`, `bucketB.json`). Do not worry about specifying paths within the configuration—the template automatically injects strict directories!
+When installed, a default config file is mapped to `/etc/s3smb-gateway/default.json`. You can create as many config domains as you need (e.g., `bucketA.json`, `bucketB.json`). Do not worry about mapping exact sub-folders manually—the systemd template naturally orchestrates isolated databases strictly per mount!
 
 ```json
 {
@@ -51,22 +51,28 @@ When installed, a default config file is dropped at `/etc/s3smb-gateway/default.
 }
 ```
 
-> **Note on Credentials:** The gateway uses standard AWS credential chains. You can set credentials via environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`), standard AWS profiles, or EC2/ECS IAM instance profiles.
+> **Note on Credentials:** The gateway uses standard AWS credential chains natively. While you can use fallback profiles, it explicitly binds credentials safely deployed using standalone `.env` containers via the custom automation scripts rather than trusting system daemon scopes completely blind.
 
 ## 🚀 Automated Mount Provisioning (Recommended)
 
-To eliminate the hassle of manually adjusting Samba configuration blocks and creating configuration datasets by hand, we've provided a simple deployment automation script!
+To completely eliminate the danger of hand-typing JSON arrays or creating configuration datasets natively incorrectly, simply utilize the built-in orchestrator!
 
-Just run the deployment script with your target bucket and optional AWS routing flags:
+Execute the deployment script targeting your specific mount name and optional AWS routing flags:
 
 ```bash
 chmod +x ./add_mount.sh
 
-# Simple Deployment (Generates bucket config natively)
+# Simple Deployment (Assumes the S3 bucket is also named "mybucket")
 sudo ./add_mount.sh mybucket
 
-# Advanced Deployment using Sub-folders and Custom Endpoints
-sudo ./add_mount.sh bucketB --prefix "media/videos/" --region "us-west-2" --endpoint "http://minio.local:9000"
+# Advanced Deployment using decoupled target buckets, Sub-folders and Custom Endpoints
+sudo ./add_mount.sh marketing_share \
+   --bucket "obs-marketing-prod-2024" \
+   --region cn-north-4 \
+   --endpoint "obs.cn-north-4.myhuaweicloud.com" \
+   --access-key "YOUR_ACCESS_KEY" \
+   --secret-key "YOUR_SECRET_KEY" \
+   --prefix "media/videos/"
 ```
 
 The script will automatically securely generate `/etc/s3smb-gateway/mybucket.json` for you, inject `[mybucket]` directly into your `/etc/samba/smb.conf`, configure your FUSE systemd template natively, and start the cache engine instantly without dropping connections to your other running S3 shares!

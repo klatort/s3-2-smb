@@ -19,9 +19,11 @@ ENDPOINT=""
 REGION="us-east-1"
 ACCESS_KEY=""
 SECRET_KEY=""
+BUCKET_NAME="${MOUNT_NAME}"
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
+        --bucket) BUCKET_NAME="$2"; shift ;;
         --prefix) PREFIX="$2"; shift ;;
         --endpoint) ENDPOINT="$2"; shift ;;
         --region) REGION="$2"; shift ;;
@@ -46,7 +48,7 @@ if [ ! -f "$JSON_CONFIG" ]; then
     cat > "$JSON_CONFIG" <<EOF
 {
   "s3": {
-    "bucket": "${MOUNT_NAME}",
+    "bucket": "${BUCKET_NAME}",
     "region": "${REGION}",
     "endpoint": "${ENDPOINT}",
     "profile": "",
