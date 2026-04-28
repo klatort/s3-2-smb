@@ -88,6 +88,10 @@ sudo ./remove_mount.sh badbucket
 
 # Or if you used a custom decoupled Share Name:
 sudo ./remove_mount.sh marketing_share --share-name "marketing share public"
+
+# Optionally retain specific configuration or cache data using --keep-data
+# Flags: j (JSON config), e (ENV credentials), s (SQL cache/db)
+sudo ./remove_mount.sh mybucket --keep-data jes
 ```
 
 This ensures the Samba node logic, active hooks, and daemon binds are all definitively neutralized safely.
