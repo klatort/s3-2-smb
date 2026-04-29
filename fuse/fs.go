@@ -507,16 +507,27 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 		return err
 	}
 
-	// Handle S3 rename (copy + delete) async
-	go func() {
-		if err := d.fs.s3.CopyObject(context.Background(), oldPath, newPath); err != nil {
-			log.Warn("failed to copy S3 object: %v\n", err)
-			return
+	// Handle S3 rename (copy + delete) synchronously so the data is
+	// consistent before the FUSE operation returns. For Office-style
+	// save-via-temp-rename (e.g. .tmp → .xlsx), the source temp key
+	// may legitimately not exist in S3 if the app renamed before
+	// closing, so we tolerate 404 errors gracefully.
+	if err := d.fs.s3.CopyObject(ctx, oldPath, newPath); err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "NoSuchKey") || strings.Contains(errStr, "NotFound") || strings.Contains(errStr, "404") {
+			// Source doesn't exist in S3 — normal for temp-rename patterns.
+			// The data will be uploaded under the new path when the handle
+			// is flushed/closed, so this is not a data-loss scenario.
+			log.Debug("S3 copy skipped (source not in S3 yet): %s → %s", oldPath, newPath)
+		} else {
+			log.Warn("failed to copy S3 object %s → %s: %v", oldPath, newPath, err)
 		}
-		if err := d.fs.s3.DeleteObject(context.Background(), oldPath); err != nil {
-			log.Warn("failed to delete old S3 object: %v\n", err)
+	} else {
+		// Copy succeeded — delete the old key
+		if err := d.fs.s3.DeleteObject(ctx, oldPath); err != nil {
+			log.Warn("failed to delete old S3 object %s: %v", oldPath, err)
 		}
-	}()
+	}
 
 	return nil
 }
