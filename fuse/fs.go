@@ -159,6 +159,8 @@ func (f *FS) Mount() error {
 		fuse.Subtype("s3"),
 		fuse.AllowOther(),
 		fuse.DefaultPermissions(),
+		fuse.MaxReadahead(1 << 20), // 1MB readahead for better sequential I/O
+		fuse.AsyncRead(),            // Allow concurrent reads on the same handle
 	}
 
 	conn, err := fuse.Mount(f.cfg.MountPoint, opts...)
@@ -219,7 +221,7 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 	a.Inode = PathToInode(d.path)
 	a.Mode = os.ModeDir | 0777
 	a.Nlink = 2
-	a.Valid = 1 * time.Second // Force attribute TTL to 1 second
+	a.Valid = 5 * time.Second // Attribute cache TTL — reduces kernel stat() calls
 
 	// For root directory, use defaults
 	if d.path == "" {
@@ -653,9 +655,10 @@ func (d *Dir) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.
 
 // File represents a file in the filesystem
 type File struct {
-	fs    *FS
-	path  string
-	entry *metadata.FileEntry
+	fs        *FS
+	path      string
+	entry     *metadata.FileEntry
+	s3Checked bool // true once the HeadObject size-fallback has been attempted
 }
 
 var _ fs.Node = (*File)(nil)
@@ -672,7 +675,7 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 	a.Inode = PathToInode(f.path)
 	a.Mode = 0666
 	a.Nlink = 1
-	a.Valid = 1 * time.Second // Force attribute TTL to 1 second
+	a.Valid = 5 * time.Second // Attribute cache TTL — reduces kernel stat() calls
 
 	// Get fresh entry from SQLite database
 	entry, err := f.fs.repo.GetEntry(ctx, f.path)
@@ -692,14 +695,16 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 		return err
 	}
 
-	// REAL-TIME S3 FETCHING FALLBACK FOR 0-BYTE ENTRIES
-	if entry.Size == 0 {
+	// ONE-SHOT S3 FALLBACK FOR 0-BYTE ENTRIES
+	// Only attempt the network HeadObject once per File lifetime to avoid
+	// a round-trip on every stat() call for empty/newly-created files.
+	if entry.Size == 0 && !f.s3Checked {
+		f.s3Checked = true
 		if s3Info, fetchErr := f.fs.s3.HeadObjectInfo(ctx, f.path); fetchErr == nil && s3Info.Size > 0 {
-			// S3 contains a real file, database cache is out of sync!
+			// S3 has a real file — database cache is out of sync, auto-cure it.
 			entry.Size = s3Info.Size
 			entry.ModTime = s3Info.LastModified
-			
-			// Auto-cure database in background
+
 			go func(e *metadata.FileEntry) {
 				_ = f.fs.repo.UpdateEntry(context.Background(), e)
 			}(entry)
@@ -1030,61 +1035,40 @@ func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fu
 	h.dirty = true
 	resp.Size = n
 
-	// Update file size in database if needed
+	// Track file size in memory only — the database is updated once in Flush()
+	// when the file is closed, avoiding a goroutine + DB round-trip per write.
 	endOffset := req.Offset + int64(n)
 	if h.file.entry != nil && endOffset > h.file.entry.Size {
 		h.file.entry.Size = endOffset
 		h.file.entry.ModTime = time.Now()
-		// Update in background to not block write
-		go func() {
-			_ = h.file.fs.repo.UpdateEntry(context.Background(), h.file.entry)
-		}()
 	}
 
 	return nil
 }
 
-// Flush is called when the file descriptor is closed (may be called multiple times)
+// Flush is called when the file descriptor is closed (may be called multiple times).
+// This is the SYNCHRONOUS close handler — the kernel waits for our response before
+// returning from close(). We MUST upload to S3 here (not in Release) because Release
+// is asynchronous and the kernel will not wait for it, causing a race where a
+// subsequent open+read can return stale pre-edit data from S3.
 func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Sync staging file to disk if dirty
-	if h.dirty && h.stagingFile != nil {
-		if err := h.stagingFile.Sync(); err != nil {
-			return fmt.Errorf("failed to sync staging file: %w", err)
-		}
-	}
-
-	return nil
-}
-
-// Release releases the file handle and uploads to S3 if dirty (upload-on-close)
-// This is SYNCHRONOUS - returns error to OS if upload fails
-func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	// Close staging file first
-	if h.stagingFile != nil {
-		h.stagingFile.Close()
-		h.stagingFile = nil
-	}
-
-	// If not dirty, just clean up
-	if !h.dirty || h.stagingPath == "" {
-		// Remove staging file if it exists
-		if h.stagingPath != "" {
-			os.Remove(h.stagingPath)
-		}
+	// Nothing to do if the file was never modified
+	if !h.dirty || h.stagingFile == nil {
 		return nil
 	}
 
-	// Upload to S3 SYNCHRONOUSLY (upload-on-close strategy)
-	// The user must know if the save failed
+	// Sync staging file to disk
+	if err := h.stagingFile.Sync(); err != nil {
+		return fmt.Errorf("failed to sync staging file: %w", err)
+	}
+
+	// --- Upload to S3 synchronously (before close returns) ---
 	s3Key := h.file.path
 
-	// Invalidate cache for this file since it's being modified
+	// Invalidate cache BEFORE upload so no concurrent reader can serve stale chunks
 	if h.file.fs.cache != nil {
 		if h.file.fs.cfg.Debug {
 			log.Debug("Invalidating cache for modified file: %s\n", s3Key)
@@ -1092,27 +1076,25 @@ func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) erro
 		h.file.fs.cache.InvalidateFile(s3Key)
 	}
 
-	// Open staging file for reading
-	stagingFile, err := os.Open(h.stagingPath)
-	if err != nil {
-		return syscall.EIO // Return I/O error to OS
+	// Seek staging file to beginning for reading
+	if _, err := h.stagingFile.Seek(0, io.SeekStart); err != nil {
+		return syscall.EIO
 	}
-	defer stagingFile.Close()
 
-	// Get file size
-	stat, err := stagingFile.Stat()
+	// Get file size from the staging file
+	stat, err := h.stagingFile.Stat()
 	if err != nil {
 		return syscall.EIO
 	}
 	fileSize := stat.Size()
 
-	// Upload to S3 using streaming (supports large files via multipart)
-	if err := h.file.fs.s3.PutObjectFromReader(ctx, s3Key, stagingFile, fileSize, "application/octet-stream"); err != nil {
+	// Upload to S3
+	if err := h.file.fs.s3.PutObjectFromReader(ctx, s3Key, h.stagingFile, fileSize, "application/octet-stream"); err != nil {
 		log.Error("failed to upload %s to S3: %v\n", s3Key, err)
-		return syscall.EIO // Return I/O error so user knows save failed
+		return syscall.EIO
 	}
 
-	// S3 upload succeeded - update SQLite database with new Size/ModTime
+	// S3 upload succeeded — update SQLite database with new Size/ModTime
 	now := time.Now()
 	if h.file.entry == nil {
 		h.file.entry = &metadata.FileEntry{
@@ -1125,13 +1107,36 @@ func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) erro
 
 	if err := h.file.fs.repo.UpdateEntry(ctx, h.file.entry); err != nil {
 		log.Warn("failed to update metadata after upload: %v\n", err)
-		// Don't return error here - S3 upload succeeded, that's what matters
+		// Don't return error — S3 upload succeeded, that's what matters
 	}
 
-	// Delete the local staging file after successful upload
-	if err := os.Remove(h.stagingPath); err != nil {
-		log.Warn("failed to remove staging file %s: %v\n", h.stagingPath, err)
+	// Mark as no longer dirty so repeated Flush() calls (e.g. dup'd fds) don't
+	// trigger redundant uploads, and Release() knows there is nothing left to do.
+	h.dirty = false
+
+	return nil
+}
+
+// Release is called when the last reference to the file handle is dropped.
+// The kernel does NOT wait for Release — it runs asynchronously after close()
+// has already returned. All data persistence is handled in Flush() above;
+// Release only performs local cleanup.
+func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// Close the staging file handle
+	if h.stagingFile != nil {
+		h.stagingFile.Close()
+		h.stagingFile = nil
 	}
 
-	return nil // Success
+	// Delete the local staging file
+	if h.stagingPath != "" {
+		if err := os.Remove(h.stagingPath); err != nil && !os.IsNotExist(err) {
+			log.Warn("failed to remove staging file %s: %v\n", h.stagingPath, err)
+		}
+	}
+
+	return nil
 }

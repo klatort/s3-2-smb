@@ -397,8 +397,13 @@ func (cm *ChunkManager) InvalidateFile(path string) error {
 			continue
 		}
 
-		// Remove from LRU
-		cm.lru.remove(chunkPath)
+		// Parse chunk ID from filename (e.g. "chunk_0" → 0) to build the
+		// correct LRU key.  Chunks are stored in the LRU under the key
+		// "path:chunkID", NOT the filesystem path.
+		var chunkID int
+		if _, scanErr := fmt.Sscanf(entry.Name(), ChunkFilePattern, &chunkID); scanErr == nil {
+			cm.lru.remove(cm.chunkKey(path, chunkID))
+		}
 		cm.currentSize -= info.Size()
 
 		// Delete file

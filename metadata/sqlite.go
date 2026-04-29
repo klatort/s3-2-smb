@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"gorm.io/driver/sqlite"
@@ -100,32 +99,23 @@ func (r *SQLiteRepository) ListEntries(ctx context.Context, dirPath string) ([]*
 		prefix = dirPath + "/"
 	}
 
-	// Get all entries, then filter for direct children
-	var allEntries []*FileEntry
 	query := r.db.WithContext(ctx)
-	
+
 	if prefix == "" {
 		// Root: get entries that don't contain "/"
-		if err := query.Where("path NOT LIKE ?", "%/%").Find(&allEntries).Error; err != nil {
+		if err := query.Where("path NOT LIKE ?", "%/%").Find(&entries).Error; err != nil {
 			return nil, fmt.Errorf("failed to list entries: %w", err)
 		}
 	} else {
-		// Subdirectory: get entries starting with prefix
-		if err := query.Where("path LIKE ?", prefix+"%").Find(&allEntries).Error; err != nil {
+		// Subdirectory: get only direct children by excluding deeper paths.
+		// The second LIKE condition filters out entries with additional "/"
+		// separators, so only immediate children of the directory are returned.
+		if err := query.Where("path LIKE ? AND path NOT LIKE ?", prefix+"%", prefix+"%/%").Find(&entries).Error; err != nil {
 			return nil, fmt.Errorf("failed to list entries: %w", err)
 		}
-		
-		// Filter to only direct children (no additional "/" after prefix)
-		for _, e := range allEntries {
-			remainder := strings.TrimPrefix(e.Path, prefix)
-			if !strings.Contains(remainder, "/") {
-				entries = append(entries, e)
-			}
-		}
-		return entries, nil
 	}
 
-	return allEntries, nil
+	return entries, nil
 }
 
 // UpdateEntry creates or updates a file entry
