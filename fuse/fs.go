@@ -507,18 +507,29 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 		return err
 	}
 
-	// Handle S3 rename (copy + delete) synchronously so the data is
-	// consistent before the FUSE operation returns. For Office-style
-	// save-via-temp-rename (e.g. .tmp → .xlsx), the source temp key
-	// may legitimately not exist in S3 if the app renamed before
-	// closing, so we tolerate 404 errors gracefully.
+	// Handle S3 rename (copy + delete) synchronously.
 	if err := d.fs.s3.CopyObject(ctx, oldPath, newPath); err != nil {
 		errStr := err.Error()
 		if strings.Contains(errStr, "NoSuchKey") || strings.Contains(errStr, "NotFound") || strings.Contains(errStr, "404") {
-			// Source doesn't exist in S3 — normal for temp-rename patterns.
-			// The data will be uploaded under the new path when the handle
-			// is flushed/closed, so this is not a data-loss scenario.
-			log.Debug("S3 copy skipped (source not in S3 yet): %s → %s", oldPath, newPath)
+			// Source key doesn't exist in S3. This is common for Office
+			// save-via-temp-rename. Try to upload from the staging file
+			// directly under the new path so data is not stranded.
+			stagingPath := d.fs.pathToStagingFile(oldPath)
+			if sf, openErr := os.Open(stagingPath); openErr == nil {
+				defer sf.Close()
+				if stat, statErr := sf.Stat(); statErr == nil && stat.Size() > 0 {
+					if uploadErr := d.fs.s3.PutObjectFromReader(ctx, newPath, sf, stat.Size(), "application/octet-stream"); uploadErr != nil {
+						log.Warn("failed to upload staging file for renamed %s: %v", newPath, uploadErr)
+					} else {
+						// Update the new entry size from the actual upload
+						newEntry.Size = stat.Size()
+						_ = d.fs.repo.UpdateEntry(ctx, newEntry)
+						log.Info("Uploaded staging file directly for renamed path: %s (%d bytes)", newPath, stat.Size())
+					}
+				}
+			} else {
+				log.Debug("S3 copy skipped (source not in S3, no staging file): %s → %s", oldPath, newPath)
+			}
 		} else {
 			log.Warn("failed to copy S3 object %s → %s: %v", oldPath, newPath, err)
 		}
@@ -1043,15 +1054,24 @@ func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fu
 		return fmt.Errorf("failed to write to staging file: %w", err)
 	}
 
-	h.dirty = true
 	resp.Size = n
 
-	// Track file size in memory only — the database is updated once in Flush()
-	// when the file is closed, avoiding a goroutine + DB round-trip per write.
+	// Update in-memory file size tracking
 	endOffset := req.Offset + int64(n)
 	if h.file.entry != nil && endOffset > h.file.entry.Size {
 		h.file.entry.Size = endOffset
 		h.file.entry.ModTime = time.Now()
+	}
+
+	// On the first write, persist the size to DB so that Rename (which reads
+	// from DB) always sees the correct size — not 0 from the initial Create.
+	if !h.dirty {
+		h.dirty = true
+		if h.file.entry != nil {
+			go func(e *metadata.FileEntry) {
+				_ = h.file.fs.repo.UpdateEntry(context.Background(), e)
+			}(h.file.entry)
+		}
 	}
 
 	return nil
