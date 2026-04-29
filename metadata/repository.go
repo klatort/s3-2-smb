@@ -16,6 +16,11 @@ type Repository interface {
 	// UpdateEntry creates or updates a file entry
 	UpdateEntry(ctx context.Context, entry *FileEntry) error
 
+	// UpdateEntryFields updates only the specified columns for an existing entry.
+	// Use this instead of UpdateEntry when you want to avoid overwriting fields
+	// that may have been concurrently updated by another operation.
+	UpdateEntryFields(ctx context.Context, path string, updates map[string]interface{}) error
+
 	// DeleteEntry removes a file entry by path
 	DeleteEntry(ctx context.Context, path string) error
 

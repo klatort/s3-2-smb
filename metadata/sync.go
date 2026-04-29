@@ -120,7 +120,7 @@ func SyncFromS3(ctx context.Context, repo Repository, client S3Client, bucket st
 				return err
 			}
 
-			// Create the entry
+				// Create the entry from S3 listing data
 				// Get accurate size from HeadObject if ListObjectsV2 returns suspicious size
 				// Huawei OBS sometimes returns incorrect large sizes (~824GB) in ListObjectsV2
 				size := aws.ToInt64(obj.Size)
@@ -135,13 +135,37 @@ func SyncFromS3(ctx context.Context, repo Repository, client S3Client, bucket st
 					}
 				}
 
+				s3ModTime := aws.ToTime(obj.LastModified)
+
+				// Guard: do NOT overwrite DB entries that are fresher than the S3 listing.
+				// This prevents the background sync from clobbering metadata that was
+				// just updated by Flush() after a user save.
+				existing, getErr := repo.GetEntry(ctx, path)
+				if getErr == nil {
+					if existing.ModTime.After(s3ModTime) {
+						// DB entry is newer — a recent Flush wrote it. Skip.
+						synced++
+						continue
+					}
+					// Preserve extended attributes (ACLs, POSIX ownership) that
+					// only exist in the DB and have no S3 equivalent.
+					if existing.Xattrs != nil {
+						// Will be carried over to the new entry below
+					}
+				}
+
 				// Create the entry
 				entry := &FileEntry{
 					Path:    path,
 					Size:    size,
-					ModTime: aws.ToTime(obj.LastModified),
+					ModTime: s3ModTime,
 					IsDir:   isDir,
 					ETag:    strings.Trim(aws.ToString(obj.ETag), "\""),
+				}
+
+				// Carry over existing xattrs if the entry existed
+				if existing != nil && existing.Xattrs != nil {
+					entry.Xattrs = existing.Xattrs
 				}
 
 			if err := repo.UpdateEntry(ctx, entry); err != nil {

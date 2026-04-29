@@ -134,6 +134,23 @@ func (r *SQLiteRepository) UpdateEntry(ctx context.Context, entry *FileEntry) er
 	return nil
 }
 
+// UpdateEntryFields updates only the specified columns for an existing entry.
+// This is used by operations like Setattr that should NOT overwrite fields
+// (like Size) that may have been concurrently updated by Flush.
+func (r *SQLiteRepository) UpdateEntryFields(ctx context.Context, path string, updates map[string]interface{}) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	path = NormalizePath(path)
+
+	result := r.db.WithContext(ctx).Model(&FileEntry{}).Where("path = ?", path).Updates(updates)
+	if result.Error != nil {
+		return fmt.Errorf("failed to update entry fields: %w", result.Error)
+	}
+
+	return nil
+}
+
 // DeleteEntry removes a file entry by path
 func (r *SQLiteRepository) DeleteEntry(ctx context.Context, path string) error {
 	r.mu.Lock()

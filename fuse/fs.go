@@ -508,7 +508,11 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 	}
 
 	// Handle S3 rename (copy + delete) synchronously.
-	if err := d.fs.s3.CopyObject(ctx, oldPath, newPath); err != nil {
+	// Use a background context — the FUSE request context can be cancelled.
+	s3Ctx, s3Cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer s3Cancel()
+
+	if err := d.fs.s3.CopyObject(s3Ctx, oldPath, newPath); err != nil {
 		errStr := err.Error()
 		if strings.Contains(errStr, "NoSuchKey") || strings.Contains(errStr, "NotFound") || strings.Contains(errStr, "404") {
 			// Source key doesn't exist in S3. This is common for Office
@@ -518,12 +522,12 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 			if sf, openErr := os.Open(stagingPath); openErr == nil {
 				defer sf.Close()
 				if stat, statErr := sf.Stat(); statErr == nil && stat.Size() > 0 {
-					if uploadErr := d.fs.s3.PutObjectFromReader(ctx, newPath, sf, stat.Size(), "application/octet-stream"); uploadErr != nil {
+					if uploadErr := d.fs.s3.PutObjectFromReader(s3Ctx, newPath, sf, stat.Size(), "application/octet-stream"); uploadErr != nil {
 						log.Warn("failed to upload staging file for renamed %s: %v", newPath, uploadErr)
 					} else {
 						// Update the new entry size from the actual upload
 						newEntry.Size = stat.Size()
-						_ = d.fs.repo.UpdateEntry(ctx, newEntry)
+						_ = d.fs.repo.UpdateEntry(s3Ctx, newEntry)
 						log.Info("Uploaded staging file directly for renamed path: %s (%d bytes)", newPath, stat.Size())
 					}
 				}
@@ -535,7 +539,7 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 		}
 	} else {
 		// Copy succeeded — delete the old key
-		if err := d.fs.s3.DeleteObject(ctx, oldPath); err != nil {
+		if err := d.fs.s3.DeleteObject(s3Ctx, oldPath); err != nil {
 			log.Warn("failed to delete old S3 object %s: %v", oldPath, err)
 		}
 	}
@@ -757,43 +761,54 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 
 // Setattr sets file attributes
 func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
+	// Build a map of ONLY the fields being changed. This prevents overwriting
+	// fields (like Size) that may have been concurrently updated by Flush().
+	updates := make(map[string]interface{})
+
+	if req.Valid.Size() {
+		updates["size"] = int64(req.Size)
+	}
+	if req.Valid.Mtime() {
+		updates["mod_time"] = req.Mtime
+	}
+
+	// Mode and ownership are stored as xattrs — we need to read the current
+	// entry to merge xattr changes, but we only write back the xattrs column.
+	if req.Valid.Mode() || req.Valid.Uid() || req.Valid.Gid() {
+		entry, err := f.fs.repo.GetEntry(ctx, f.path)
+		if err != nil {
+			return err
+		}
+
+		if req.Valid.Mode() {
+			entry.SetPosixMode(os.FileMode(req.Mode))
+		}
+		if req.Valid.Uid() || req.Valid.Gid() {
+			uid, gid, _ := entry.GetPosixOwner()
+			if req.Valid.Uid() {
+				uid = req.Uid
+			}
+			if req.Valid.Gid() {
+				gid = req.Gid
+			}
+			entry.SetPosixOwner(uid, gid)
+		}
+
+		updates["xattrs"] = entry.Xattrs
+	}
+
+	// Apply partial update — only the columns in the map are modified
+	if len(updates) > 0 {
+		if err := f.fs.repo.UpdateEntryFields(ctx, f.path, updates); err != nil {
+			return err
+		}
+	}
+
+	// Re-read the full entry for the response and in-memory cache
 	entry, err := f.fs.repo.GetEntry(ctx, f.path)
 	if err != nil {
 		return err
 	}
-
-	// Update size if requested (truncate)
-	if req.Valid.Size() {
-		entry.Size = int64(req.Size)
-	}
-
-	// Update modification time if requested
-	if req.Valid.Mtime() {
-		entry.ModTime = req.Mtime
-	}
-
-	// Update permissions/mode if requested
-	if req.Valid.Mode() {
-		entry.SetPosixMode(os.FileMode(req.Mode))
-	}
-
-	// Update ownership if requested
-	if req.Valid.Uid() || req.Valid.Gid() {
-		// Read existing uid/gid
-		uid, gid, _ := entry.GetPosixOwner()
-		if req.Valid.Uid() {
-			uid = req.Uid
-		}
-		if req.Valid.Gid() {
-			gid = req.Gid
-		}
-		entry.SetPosixOwner(uid, gid)
-	}
-
-	if err := f.fs.repo.UpdateEntry(ctx, entry); err != nil {
-		return err
-	}
-
 	f.entry = entry
 
 	// Fill response
@@ -1119,9 +1134,15 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 	}
 	fileSize := stat.Size()
 
+	// Use a generous background context for the S3 upload — the FUSE request
+	// context (ctx) can be cancelled or have short deadlines, which would
+	// silently abort the upload and leave a 0-byte file.
+	uploadCtx, uploadCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer uploadCancel()
+
 	// Upload to S3
-	if err := h.file.fs.s3.PutObjectFromReader(ctx, s3Key, h.stagingFile, fileSize, "application/octet-stream"); err != nil {
-		log.Error("failed to upload %s to S3: %v\n", s3Key, err)
+	if err := h.file.fs.s3.PutObjectFromReader(uploadCtx, s3Key, h.stagingFile, fileSize, "application/octet-stream"); err != nil {
+		log.Error("failed to upload %s to S3 (%d bytes): %v", s3Key, fileSize, err)
 		return syscall.EIO
 	}
 
@@ -1136,7 +1157,7 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 	h.file.entry.Size = fileSize
 	h.file.entry.ModTime = now
 
-	if err := h.file.fs.repo.UpdateEntry(ctx, h.file.entry); err != nil {
+	if err := h.file.fs.repo.UpdateEntry(uploadCtx, h.file.entry); err != nil {
 		log.Warn("failed to update metadata after upload: %v\n", err)
 		// Don't return error — S3 upload succeeded, that's what matters
 	}
