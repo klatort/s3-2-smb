@@ -452,6 +452,11 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 		return err
 	}
 
+	// Invalidate cached chunks so deleted file can't serve ghost data
+	if d.fs.cache != nil {
+		d.fs.cache.InvalidateFile(childPath)
+	}
+
 	// Delete from S3 (async)
 	go func() {
 		if err := d.fs.s3.DeleteObject(context.Background(), childPath); err != nil {
@@ -471,6 +476,8 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 
 	oldPath := metadata.JoinPath(d.path, req.OldName)
 	newPath := metadata.JoinPath(newParent.path, req.NewName)
+
+	log.Info("Rename: %s → %s", oldPath, newPath)
 
 	// Get the source entry from database
 	entry, err := d.fs.repo.GetEntry(ctx, oldPath)
@@ -507,6 +514,15 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 		return err
 	}
 
+	// *** CRITICAL: Invalidate chunk cache for BOTH paths ***
+	// Without this, the ChunkManager will serve stale cached chunks for the
+	// destination path, causing "modification disappears after a few minutes"
+	// when the SMB client's own cache expires and it re-reads from the gateway.
+	if d.fs.cache != nil {
+		d.fs.cache.InvalidateFile(oldPath)
+		d.fs.cache.InvalidateFile(newPath)
+	}
+
 	// Handle S3 rename (copy + delete) synchronously.
 	// Use a background context — the FUSE request context can be cancelled.
 	s3Ctx, s3Cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -528,17 +544,18 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 						// Update the new entry size from the actual upload
 						newEntry.Size = stat.Size()
 						_ = d.fs.repo.UpdateEntry(s3Ctx, newEntry)
-						log.Info("Uploaded staging file directly for renamed path: %s (%d bytes)", newPath, stat.Size())
+						log.Info("Rename (staging upload): %s (%d bytes)", newPath, stat.Size())
 					}
 				}
 			} else {
 				log.Debug("S3 copy skipped (source not in S3, no staging file): %s → %s", oldPath, newPath)
 			}
 		} else {
-			log.Warn("failed to copy S3 object %s → %s: %v", oldPath, newPath, err)
+			log.Warn("Rename S3 copy failed %s → %s: %v", oldPath, newPath, err)
 		}
 	} else {
 		// Copy succeeded — delete the old key
+		log.Info("Rename S3 copy OK: %s → %s", oldPath, newPath)
 		if err := d.fs.s3.DeleteObject(s3Ctx, oldPath); err != nil {
 			log.Warn("failed to delete old S3 object %s: %v", oldPath, err)
 		}
@@ -767,6 +784,10 @@ func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse
 
 	if req.Valid.Size() {
 		updates["size"] = int64(req.Size)
+		// Invalidate cached chunks — file content is changing size
+		if f.fs.cache != nil {
+			f.fs.cache.InvalidateFile(f.path)
+		}
 	}
 	if req.Valid.Mtime() {
 		updates["mod_time"] = req.Mtime
@@ -1104,11 +1125,10 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 
 	// Nothing to do if the file was never modified
 	if !h.dirty || h.stagingFile == nil {
-		log.Info("Flush (skip): %s dirty=%v staging=%v", h.file.path, h.dirty, h.stagingFile != nil)
 		return nil
 	}
 
-	log.Info("Flush (start): %s", h.file.path)
+	log.Info("Flush: uploading %s", h.file.path)
 
 	// Sync staging file to disk
 	if err := h.stagingFile.Sync(); err != nil {
