@@ -1045,6 +1045,7 @@ func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fu
 	defer h.mu.Unlock()
 
 	if h.stagingFile == nil {
+		log.Warn("Write called with nil staging file for %s", h.file.path)
 		return syscall.EIO
 	}
 
@@ -1103,8 +1104,11 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 
 	// Nothing to do if the file was never modified
 	if !h.dirty || h.stagingFile == nil {
+		log.Info("Flush (skip): %s dirty=%v staging=%v", h.file.path, h.dirty, h.stagingFile != nil)
 		return nil
 	}
+
+	log.Info("Flush (start): %s", h.file.path)
 
 	// Sync staging file to disk
 	if err := h.stagingFile.Sync(); err != nil {
@@ -1142,9 +1146,11 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 
 	// Upload to S3
 	if err := h.file.fs.s3.PutObjectFromReader(uploadCtx, s3Key, h.stagingFile, fileSize, "application/octet-stream"); err != nil {
-		log.Error("failed to upload %s to S3 (%d bytes): %v", s3Key, fileSize, err)
+		log.Error("Flush FAILED: %s (%d bytes): %v", s3Key, fileSize, err)
 		return syscall.EIO
 	}
+
+	log.Info("Flush (uploaded): %s (%d bytes)", s3Key, fileSize)
 
 	// S3 upload succeeded — update SQLite database with new Size/ModTime
 	now := time.Now()
