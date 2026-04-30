@@ -84,7 +84,31 @@ fi
 # 2. Inject Samba configuration if not present
 echo "Configuring Samba share [${SHARE_NAME}]..."
 if ! grep -q "^\[${SHARE_NAME}\]" "$SMB_CONF"; then
-    echo -e "\n[${SHARE_NAME}]\n   path = ${MOUNT_PATH}\n   read only = no\n   guest ok = yes\n   force user = root\n   vfs objects = catia fruit streams_xattr\n   ea support = yes\n   oplocks = yes\n   level2 oplocks = yes\n   kernel oplocks = no\n   posix locking = no\n   strict locking = no\n" >> "$SMB_CONF"
+    cat >> "$SMB_CONF" <<SMBEOF
+
+[${SHARE_NAME}]
+   path = ${MOUNT_PATH}
+   read only = no
+   guest ok = yes
+   force user = root
+
+   # VFS modules for Windows compatibility
+   vfs objects = catia fruit streams_xattr
+   ea support = yes
+   store dos attributes = yes
+   map archive = no
+   map hidden = no
+   map system = no
+
+   # CRITICAL: FUSE doesn't support kernel-level locks or oplocks.
+   # Without these, Samba tries to use fcntl/POSIX locks that FUSE
+   # can't enforce, causing clients to cache stale data indefinitely.
+   kernel oplocks = no
+   kernel share modes = no
+   posix locking = no
+   strict locking = no
+   smb2 leases = no
+SMBEOF
     echo "Successfully injected Samba configuration."
 else
     echo "Samba block [${SHARE_NAME}] already exists. Skipping injection."
