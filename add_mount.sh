@@ -84,7 +84,7 @@ fi
 # 2. Inject Samba configuration if not present
 echo "Configuring Samba share [${SHARE_NAME}]..."
 if ! grep -q "^\[${SHARE_NAME}\]" "$SMB_CONF"; then
-    echo -e "\n[${SHARE_NAME}]\n   path = ${MOUNT_PATH}\n   read only = no\n   guest ok = yes\n   force user = root\n   vfs objects = catia fruit streams_xattr\n   ea support = yes\n" >> "$SMB_CONF"
+    echo -e "\n[${SHARE_NAME}]\n   path = ${MOUNT_PATH}\n   read only = no\n   guest ok = yes\n   force user = root\n   vfs objects = catia fruit streams_xattr\n   ea support = yes\n   oplocks = yes\n   level2 oplocks = yes\n   kernel oplocks = no\n   posix locking = no\n   strict locking = no\n" >> "$SMB_CONF"
     echo "Successfully injected Samba configuration."
 else
     echo "Samba block [${SHARE_NAME}] already exists. Skipping injection."
