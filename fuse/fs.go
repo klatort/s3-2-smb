@@ -741,16 +741,17 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 	// ONE-SHOT S3 FALLBACK FOR 0-BYTE ENTRIES
 	// Only attempt the network HeadObject once per File lifetime to avoid
 	// a round-trip on every stat() call for empty/newly-created files.
-	if entry.Size == 0 && !f.s3Checked {
+	if entry.Size == 0 && !entry.IsDir && !f.s3Checked {
 		f.s3Checked = true
 		if s3Info, fetchErr := f.fs.s3.HeadObjectInfo(ctx, f.path); fetchErr == nil && s3Info.Size > 0 {
-			// S3 has a real file — database cache is out of sync, auto-cure it.
 			entry.Size = s3Info.Size
 			entry.ModTime = s3Info.LastModified
 
-			go func(e *metadata.FileEntry) {
-				_ = f.fs.repo.UpdateEntry(context.Background(), e)
-			}(entry)
+			// Use partial update to avoid overwriting other columns
+			_ = f.fs.repo.UpdateEntryFields(context.Background(), f.path, map[string]interface{}{
+				"size":     s3Info.Size,
+				"mod_time": s3Info.LastModified,
+			})
 		}
 	}
 
@@ -1105,9 +1106,15 @@ func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fu
 	if !h.dirty {
 		h.dirty = true
 		if h.file.entry != nil {
-			go func(e *metadata.FileEntry) {
-				_ = h.file.fs.repo.UpdateEntry(context.Background(), e)
-			}(h.file.entry)
+			size := h.file.entry.Size
+			modTime := h.file.entry.ModTime
+			path := h.file.path
+			go func() {
+				_ = h.file.fs.repo.UpdateEntryFields(context.Background(), path, map[string]interface{}{
+					"size":     size,
+					"mod_time": modTime,
+				})
+			}()
 		}
 	}
 

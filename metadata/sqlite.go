@@ -214,7 +214,10 @@ func (r *SQLiteRepository) SetXattr(ctx context.Context, path, name string, valu
 
 	entry.SetXattr(name, value)
 
-	if err := r.db.WithContext(ctx).Save(&entry).Error; err != nil {
+	// CRITICAL: Only update the xattrs column — NOT the entire row.
+	// A full Save() would overwrite Size/ModTime with whatever was read
+	// above, clobbering any concurrent Flush/Rename updates.
+	if err := r.db.WithContext(ctx).Model(&entry).Update("xattrs", entry.Xattrs).Error; err != nil {
 		return fmt.Errorf("failed to save xattr: %w", err)
 	}
 
@@ -238,7 +241,8 @@ func (r *SQLiteRepository) RemoveXattr(ctx context.Context, path, name string) e
 
 	entry.RemoveXattr(name)
 
-	if err := r.db.WithContext(ctx).Save(&entry).Error; err != nil {
+	// Only update the xattrs column — same reason as SetXattr above.
+	if err := r.db.WithContext(ctx).Model(&entry).Update("xattrs", entry.Xattrs).Error; err != nil {
 		return fmt.Errorf("failed to save entry: %w", err)
 	}
 
