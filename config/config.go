@@ -40,6 +40,38 @@ type Config struct {
 
 	// Debug enables verbose logging
 	Debug bool `json:"debug"`
+
+	// SyncOnStart controls whether the S3 bucket is synced into the local
+	// metadata DB at startup. When true, the FUSE filesystem will not begin
+	// serving requests until the initial sync completes (or SyncStartTimeout
+	// is exceeded), ensuring all clients see a consistent directory listing.
+	SyncOnStart bool `json:"sync_on_start"`
+
+	// SyncInterval is the number of seconds between periodic background
+	// re-syncs of the S3 bucket into the local metadata DB.
+	// Set to 0 to disable periodic sync (only sync at startup if SyncOnStart
+	// is true). A value like 3600 (1 hour) or 86400 (24 hours / nightly) is
+	// recommended so that files added externally to S3 become visible.
+	SyncInterval int `json:"sync_interval"`
+
+	// SyncStartTimeout is the maximum number of seconds to wait for the
+	// initial startup sync before allowing FUSE to start serving anyway.
+	// Default 120 seconds. 0 means wait forever.
+	SyncStartTimeout int `json:"sync_start_timeout"`
+
+	// WritebackIdleTime is the number of seconds a file must remain unmodified
+	// before the background daemon uploads it to S3 and cleans the local cache.
+	// Default is 300 seconds (5 minutes).
+	WritebackIdleTime int `json:"writeback_idle_time"`
+
+	// WritebackInterval is the number of seconds between sweeps of the background
+	// write-back daemon. Default is 60 seconds.
+	WritebackInterval int `json:"writeback_interval"`
+
+	// CacheRetentionTime is the number of seconds to keep the local staging file
+	// around for fast reads after it has been uploaded to S3. 
+	// Default is 604800 (7 days). The file is evicted if not accessed.
+	CacheRetentionTime int `json:"cache_retention_time"`
 }
 
 // S3Config holds S3-specific configuration
@@ -59,10 +91,16 @@ type S3Config struct {
 // NewDefaultConfig returns a Config with sensible defaults
 func NewDefaultConfig() *Config {
 	return &Config{
-		CacheDir:  DefaultCacheDir,
-		DBPath:    DefaultDBPath,
-		ChunkSize: ChunkSize,
-		Debug:     false,
+		CacheDir:          DefaultCacheDir,
+		DBPath:            DefaultDBPath,
+		ChunkSize:         ChunkSize,
+		Debug:             false,
+		SyncOnStart:       false,
+		SyncInterval:      0,
+		SyncStartTimeout:  120,
+		WritebackIdleTime: 300,
+		WritebackInterval: 60,
+		CacheRetentionTime: 604800,
 	}
 }
 

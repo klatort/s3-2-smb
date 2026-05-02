@@ -365,16 +365,25 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 		}
 	}
 
-	// Create directory marker in S3 (async, non-blocking)
-	go func() {
-		s3Key := childPath
-		if err := d.fs.s3.CreateDirectory(context.Background(), s3Key); err != nil {
-			log.Warn("Failed to create S3 directory %s: %v", s3Key, err)
-		}
-	}()
+	// Create directory marker in S3 synchronously.
+	// Using a background context with a short timeout so the FUSE request
+	// context (which may have an aggressive deadline) doesn't abort the
+	// S3 call.  If S3 creation fails we roll back the DB entry to keep
+	// local and remote state consistent — preventing a silent divergence
+	// that would only surface after a gateway restart+sync.
+	s3Ctx, s3Cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer s3Cancel()
+	if err := d.fs.s3.CreateDirectory(s3Ctx, childPath); err != nil {
+		// Roll back the DB entry so the user doesn't see a directory that
+		// doesn't exist in S3.
+		_ = d.fs.repo.DeleteEntry(context.Background(), childPath)
+		log.Warn("Mkdir: S3 directory creation failed for %s: %v", childPath, err)
+		return nil, syscall.EIO
+	}
 
 	return &Dir{fs: d.fs, path: childPath}, nil
 }
+
 
 // Create creates a new file
 func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
@@ -447,9 +456,23 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 		}
 	}
 
-	// Delete from SQLite database
-	if err := d.fs.repo.DeleteEntry(ctx, childPath); err != nil {
-		return err
+	// Delete from S3 first (synchronous, short timeout).
+	// Performing the S3 delete BEFORE the DB delete ensures that if S3
+	// fails we leave the DB entry intact — the user's file remains visible
+	// and they see an error rather than a silent phantom deletion that would
+	// re-appear after the next sync.
+	s3Ctx, s3Cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer s3Cancel()
+	if err := d.fs.s3.DeleteObject(s3Ctx, childPath); err != nil {
+		// Tolerate "not found" — the object may have already been deleted
+		// externally, in which case the DB cleanup should still proceed.
+		errStr := err.Error()
+		if !strings.Contains(errStr, "NoSuchKey") &&
+			!strings.Contains(errStr, "NotFound") &&
+			!strings.Contains(errStr, "404") {
+			log.Warn("Remove: S3 delete failed for %s: %v", childPath, err)
+			return syscall.EIO
+		}
 	}
 
 	// Invalidate cached chunks so deleted file can't serve ghost data
@@ -457,12 +480,10 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 		d.fs.cache.InvalidateFile(childPath)
 	}
 
-	// Delete from S3 (async)
-	go func() {
-		if err := d.fs.s3.DeleteObject(context.Background(), childPath); err != nil {
-			log.Warn("failed to delete S3 object %s: %v\n", childPath, err)
-		}
-	}()
+	// Remove from DB only after S3 delete confirmed (or confirmed-not-found)
+	if err := d.fs.repo.DeleteEntry(ctx, childPath); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -738,20 +759,30 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 		return err
 	}
 
-	// ONE-SHOT S3 FALLBACK FOR 0-BYTE ENTRIES
-	// Only attempt the network HeadObject once per File lifetime to avoid
-	// a round-trip on every stat() call for empty/newly-created files.
-	if entry.Size == 0 && !entry.IsDir && !f.s3Checked {
-		f.s3Checked = true
+	// S3 FALLBACK FOR 0-BYTE ENTRIES
+	// If the DB has size=0 and the entry has never been verified against S3
+	// (S3VerifiedAt is zero), perform a one-shot HeadObject to get the real
+	// size and persist it.  The S3VerifiedAt timestamp is stored in the DB
+	// so this check survives across FUSE Lookup calls (unlike the old
+	// per-struct s3Checked bool which was reset on every Lookup).
+	if entry.Size == 0 && !entry.IsDir && entry.S3VerifiedAt.IsZero() {
 		if s3Info, fetchErr := f.fs.s3.HeadObjectInfo(ctx, f.path); fetchErr == nil && s3Info.Size > 0 {
 			entry.Size = s3Info.Size
 			entry.ModTime = s3Info.LastModified
 
-			// Use partial update to avoid overwriting other columns
+			now := time.Now()
+			// Persist both the corrected size and the verification timestamp so
+			// future Attr() calls don't repeat the HeadObject round-trip.
 			_ = f.fs.repo.UpdateEntryFields(context.Background(), f.path, map[string]interface{}{
-				"size":     s3Info.Size,
-				"mod_time": s3Info.LastModified,
+				"size":           s3Info.Size,
+				"mod_time":       s3Info.LastModified,
+				"s3_verified_at": now,
 			})
+			entry.S3VerifiedAt = now
+		} else if fetchErr != nil {
+			// HeadObject failed (network blip, rate limit, etc.).
+			// Do NOT set S3VerifiedAt so we retry next time Attr() is called.
+			log.Debug("Attr: HeadObject fallback failed for %s: %v", f.path, fetchErr)
 		}
 	}
 
@@ -860,40 +891,37 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 		dirty: false,
 	}
 
-	// Always create a staging file for write operations
-	// For read-only operations, we skip this to allow ChunkManager lazy-loading
-	stagingPath := f.fs.pathToStagingFile(f.path)
-
-	// Check if this is a write operation
 	isWrite := req.Flags.IsWriteOnly() || req.Flags.IsReadWrite()
+	var stagingPath string
+	var stagingFile *os.File
+	var err error
 
-	if isWrite {
-		// Ensure staging directory exists
+	// If the file is dirty locally OR has a retained local read-cache staging file,
+	// we use the local staging file.
+	if f.entry != nil && f.entry.LocalStagingPath != "" {
+		stagingPath = f.entry.LocalStagingPath
+		flags := os.O_RDONLY
+		if isWrite {
+			flags = os.O_RDWR
+		}
+		stagingFile, err = os.OpenFile(stagingPath, flags, 0644)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open local dirty cache file: %w", err)
+		}
+	} else if isWrite {
+		// New write operation on a clean file: create a staging file
 		if err := os.MkdirAll(f.fs.stagingDir, 0755); err != nil {
 			return nil, fmt.Errorf("failed to create staging directory %s: %w", f.fs.stagingDir, err)
 		}
-
-		// We strictly DO NOT download from S3 here to prevent Windows Explorer 
-		// metadata reads (O_RDWR) from freezing the gateway!
-		// The S3 object is lazily staged on the very first Write() hook.
-
-		// Determine file open mode
-		flags := os.O_RDWR | os.O_CREATE
-
-		// Open or create the staging file
-		stagingFile, err := os.OpenFile(stagingPath, flags, 0644)
+		stagingPath = f.fs.pathToStagingFile(f.path)
+		stagingFile, err = os.OpenFile(stagingPath, os.O_RDWR|os.O_CREATE, 0644)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open staging file: %w", err)
 		}
-
-		handle.stagingPath = stagingPath
-		handle.stagingFile = stagingFile
-	} else {
-		// For read-only operations, we rely strictly on the ChunkManager!
-		// No staging file is kept open or downloaded.
-		handle.stagingPath = ""
-		handle.stagingFile = nil
 	}
+
+	handle.stagingPath = stagingPath
+	handle.stagingFile = stagingFile
 
 	return handle, nil
 }
@@ -979,6 +1007,7 @@ type FileHandle struct {
 	stagingFile *os.File // Open staging file handle
 	dirty       bool     // True if data has been written
 	mu          sync.Mutex
+	fetchOnce   sync.Once
 }
 
 var _ fs.Handle = (*FileHandle)(nil)
@@ -992,8 +1021,8 @@ func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// If we have a dirty staging file, read from it
-	if h.dirty && h.stagingFile != nil {
+	// If we have a local staging file from a write operation OR an existing retained cache
+	if h.stagingFile != nil && (h.dirty || (h.file.entry != nil && h.file.entry.LocalStagingPath != "")) {
 		buf := make([]byte, req.Size)
 		n, err := h.stagingFile.ReadAt(buf, req.Offset)
 		if err != nil && err != io.EOF {
@@ -1063,28 +1092,36 @@ func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse
 
 // Write writes data to the local staging file
 func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	if h.stagingFile == nil {
 		log.Warn("Write called with nil staging file for %s", h.file.path)
 		return syscall.EIO
 	}
 
-	// First time modifying the file: securely fetch original S3 payload into staging file
-	if !h.dirty && h.file.entry != nil && h.file.entry.Size > 0 {
-		reader, _, err := h.file.fs.s3.GetObject(ctx, h.file.path)
-		if err == nil && reader != nil {
-			defer reader.Close()
-			h.stagingFile.Seek(0, io.SeekStart)
-			io.Copy(h.stagingFile, reader)
-		} else if err != nil {
-			errStr := err.Error()
-			if !strings.Contains(errStr, "NoSuchKey") && !strings.Contains(errStr, "NotFound") {
-				log.Warn("Lazy stage logic failed to fetch %s before write: %v", h.file.path, err)
+	// First time modifying the file: securely fetch original S3 payload into staging file.
+	// We do this OUTSIDE the handle mutex using sync.Once so that a slow download
+	// doesn't freeze the entire FUSE mount. We use a background context so the download
+	// isn't aborted (leaving a corrupted staging file) if the SMB client times out this specific write request.
+	h.fetchOnce.Do(func() {
+		if h.file.entry != nil && h.file.entry.Size > 0 {
+			fetchCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			reader, _, err := h.file.fs.s3.GetObject(fetchCtx, h.file.path)
+			if err == nil && reader != nil {
+				defer reader.Close()
+				h.stagingFile.Seek(0, io.SeekStart)
+				io.Copy(h.stagingFile, reader)
+			} else if err != nil {
+				errStr := err.Error()
+				if !strings.Contains(errStr, "NoSuchKey") && !strings.Contains(errStr, "NotFound") {
+					log.Warn("Lazy stage logic failed to fetch %s before write: %v", h.file.path, err)
+				}
 			}
 		}
-	}
+	})
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
 
 	// Write to the staging file at the specified offset
 	n, err := h.stagingFile.WriteAt(req.Data, req.Offset)
@@ -1122,40 +1159,23 @@ func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fu
 }
 
 // Flush is called when the file descriptor is closed (may be called multiple times).
-// This is the SYNCHRONOUS close handler — the kernel waits for our response before
-// returning from close(). We MUST upload to S3 here (not in Release) because Release
-// is asynchronous and the kernel will not wait for it, causing a race where a
-// subsequent open+read can return stale pre-edit data from S3.
+// Instead of uploading to S3 synchronously, we now implement a WRITE-BACK cache.
+// We flush the staging file to disk, mark the file as LocalDirty in the SQLite database,
+// and return immediately. The background writeback daemon handles the S3 upload later.
 func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Nothing to do if the file was never modified
+	// Nothing to do if the file was never modified by this handle
 	if !h.dirty || h.stagingFile == nil {
 		return nil
 	}
 
-	log.Info("Flush: uploading %s", h.file.path)
+	log.Info("Flush: saving local changes to cache %s", h.file.path)
 
 	// Sync staging file to disk
 	if err := h.stagingFile.Sync(); err != nil {
 		return fmt.Errorf("failed to sync staging file: %w", err)
-	}
-
-	// --- Upload to S3 synchronously (before close returns) ---
-	s3Key := h.file.path
-
-	// Invalidate cache BEFORE upload so no concurrent reader can serve stale chunks
-	if h.file.fs.cache != nil {
-		if h.file.fs.cfg.Debug {
-			log.Debug("Invalidating cache for modified file: %s\n", s3Key)
-		}
-		h.file.fs.cache.InvalidateFile(s3Key)
-	}
-
-	// Seek staging file to beginning for reading
-	if _, err := h.stagingFile.Seek(0, io.SeekStart); err != nil {
-		return syscall.EIO
 	}
 
 	// Get file size from the staging file
@@ -1165,21 +1185,12 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 	}
 	fileSize := stat.Size()
 
-	// Use a generous background context for the S3 upload — the FUSE request
-	// context (ctx) can be cancelled or have short deadlines, which would
-	// silently abort the upload and leave a 0-byte file.
-	uploadCtx, uploadCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer uploadCancel()
-
-	// Upload to S3
-	if err := h.file.fs.s3.PutObjectFromReader(uploadCtx, s3Key, h.stagingFile, fileSize, "application/octet-stream"); err != nil {
-		log.Error("Flush FAILED: %s (%d bytes): %v", s3Key, fileSize, err)
-		return syscall.EIO
+	// Invalidate chunk cache BEFORE updating DB so no concurrent reader can serve stale S3 chunks
+	if h.file.fs.cache != nil {
+		h.file.fs.cache.InvalidateFile(h.file.path)
 	}
 
-	log.Info("Flush (uploaded): %s (%d bytes)", s3Key, fileSize)
-
-	// S3 upload succeeded — update SQLite database with new Size/ModTime
+	// Update SQLite database with new Size/ModTime and mark it dirty for writeback.
 	now := time.Now()
 	if h.file.entry == nil {
 		h.file.entry = &metadata.FileEntry{
@@ -1189,23 +1200,21 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 	}
 	h.file.entry.Size = fileSize
 	h.file.entry.ModTime = now
+	h.file.entry.LocalDirty = true
+	h.file.entry.LocalStagingPath = h.stagingPath
 
-	if err := h.file.fs.repo.UpdateEntry(uploadCtx, h.file.entry); err != nil {
-		log.Warn("failed to update metadata after upload: %v\n", err)
-		// Don't return error — S3 upload succeeded, that's what matters
+	if err := h.file.fs.repo.UpdateEntry(context.Background(), h.file.entry); err != nil {
+		log.Warn("failed to update metadata after local write: %v\n", err)
 	}
 
 	// Mark as no longer dirty so repeated Flush() calls (e.g. dup'd fds) don't
-	// trigger redundant uploads, and Release() knows there is nothing left to do.
+	// trigger redundant updates.
 	h.dirty = false
 
 	return nil
 }
 
 // Release is called when the last reference to the file handle is dropped.
-// The kernel does NOT wait for Release — it runs asynchronously after close()
-// has already returned. All data persistence is handled in Flush() above;
-// Release only performs local cleanup.
 func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1216,10 +1225,14 @@ func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) erro
 		h.stagingFile = nil
 	}
 
-	// Delete the local staging file
+	// Delete the local staging file ONLY if it's not marked for writeback.
+	// If it is dirty, the background writeback daemon will upload and delete it.
 	if h.stagingPath != "" {
-		if err := os.Remove(h.stagingPath); err != nil && !os.IsNotExist(err) {
-			log.Warn("failed to remove staging file %s: %v\n", h.stagingPath, err)
+		entry, err := h.file.fs.repo.GetEntry(context.Background(), h.file.path)
+		if err != nil || !entry.LocalDirty {
+			if err := os.Remove(h.stagingPath); err != nil && !os.IsNotExist(err) {
+				log.Warn("failed to remove staging file %s: %v\n", h.stagingPath, err)
+			}
 		}
 	}
 

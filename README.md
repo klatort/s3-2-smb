@@ -47,9 +47,13 @@ When installed, a default config file is mapped to `/etc/s3smb-gateway/default.j
   },
   "chunk_size": 16777216,
   "max_cache_size": 10737418240,
+  "sync_on_start": true,
+  "sync_interval": 3600,
   "debug": false
 }
 ```
+
+> **Note on Syncing:** By default, FUSE lists files from the local metadata database. Setting `sync_on_start: true` forces the gateway to wait for a full S3 sync before serving requests. Setting `sync_interval` (in seconds) ensures files uploaded externally to S3 will periodically appear in the SMB share (e.g. 3600 for hourly).
 
 > **Note on Credentials:** The gateway uses standard AWS credential chains natively. While you can use fallback profiles, it explicitly binds credentials safely deployed using standalone `.env` containers via the custom automation scripts rather than trusting system daemon scopes completely blind.
 

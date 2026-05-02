@@ -11,12 +11,20 @@ import (
 
 // FileEntry represents a file or directory entry cached from S3
 type FileEntry struct {
-	Path    string    `gorm:"primaryKey;not null" json:"path"`
-	Size    int64     `gorm:"not null;default:0" json:"size"`
-	ModTime time.Time `gorm:"not null" json:"mod_time"`
-	IsDir   bool      `gorm:"not null;default:false" json:"is_dir"`
-	ETag    string    `gorm:"" json:"etag,omitempty"`
-	Xattrs  XattrMap  `gorm:"type:text" json:"xattrs,omitempty"` // JSON blob for extended attributes
+	Path             string    `gorm:"primaryKey;not null" json:"path"`
+	Size             int64     `gorm:"not null;default:0" json:"size"`
+	ModTime          time.Time `gorm:"not null" json:"mod_time"`
+	IsDir            bool      `gorm:"not null;default:false" json:"is_dir"`
+	ETag             string    `gorm:"" json:"etag,omitempty"`
+	Xattrs           XattrMap  `gorm:"type:text" json:"xattrs,omitempty"` // JSON blob for extended attributes
+	// S3VerifiedAt is the timestamp of the last successful HeadObject check
+	// for this entry. Used to suppress redundant HeadObject round-trips when
+	// the entry has already been confirmed accurate recently.
+	S3VerifiedAt     time.Time `gorm:"default:null" json:"s3_verified_at,omitempty"`
+	
+	// Write-back caching fields
+	LocalDirty       bool      `gorm:"not null;default:false" json:"local_dirty"`
+	LocalStagingPath string    `gorm:"default:null" json:"local_staging_path,omitempty"`
 }
 
 // TableName specifies the table name for GORM
