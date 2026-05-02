@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"gorm.io/driver/sqlite"
@@ -100,32 +99,23 @@ func (r *SQLiteRepository) ListEntries(ctx context.Context, dirPath string) ([]*
 		prefix = dirPath + "/"
 	}
 
-	// Get all entries, then filter for direct children
-	var allEntries []*FileEntry
 	query := r.db.WithContext(ctx)
-	
+
 	if prefix == "" {
 		// Root: get entries that don't contain "/"
-		if err := query.Where("path NOT LIKE ?", "%/%").Find(&allEntries).Error; err != nil {
+		if err := query.Where("path NOT LIKE ?", "%/%").Find(&entries).Error; err != nil {
 			return nil, fmt.Errorf("failed to list entries: %w", err)
 		}
 	} else {
-		// Subdirectory: get entries starting with prefix
-		if err := query.Where("path LIKE ?", prefix+"%").Find(&allEntries).Error; err != nil {
+		// Subdirectory: get only direct children by excluding deeper paths.
+		// The second LIKE condition filters out entries with additional "/"
+		// separators, so only immediate children of the directory are returned.
+		if err := query.Where("path LIKE ? AND path NOT LIKE ?", prefix+"%", prefix+"%/%").Find(&entries).Error; err != nil {
 			return nil, fmt.Errorf("failed to list entries: %w", err)
 		}
-		
-		// Filter to only direct children (no additional "/" after prefix)
-		for _, e := range allEntries {
-			remainder := strings.TrimPrefix(e.Path, prefix)
-			if !strings.Contains(remainder, "/") {
-				entries = append(entries, e)
-			}
-		}
-		return entries, nil
 	}
 
-	return allEntries, nil
+	return entries, nil
 }
 
 // UpdateEntry creates or updates a file entry
@@ -139,6 +129,23 @@ func (r *SQLiteRepository) UpdateEntry(ctx context.Context, entry *FileEntry) er
 	result := r.db.WithContext(ctx).Where("path = ?", entry.Path).Assign(entry).FirstOrCreate(entry)
 	if result.Error != nil {
 		return fmt.Errorf("failed to update entry: %w", result.Error)
+	}
+
+	return nil
+}
+
+// UpdateEntryFields updates only the specified columns for an existing entry.
+// This is used by operations like Setattr that should NOT overwrite fields
+// (like Size) that may have been concurrently updated by Flush.
+func (r *SQLiteRepository) UpdateEntryFields(ctx context.Context, path string, updates map[string]interface{}) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	path = NormalizePath(path)
+
+	result := r.db.WithContext(ctx).Model(&FileEntry{}).Where("path = ?", path).Updates(updates)
+	if result.Error != nil {
+		return fmt.Errorf("failed to update entry fields: %w", result.Error)
 	}
 
 	return nil
@@ -207,7 +214,10 @@ func (r *SQLiteRepository) SetXattr(ctx context.Context, path, name string, valu
 
 	entry.SetXattr(name, value)
 
-	if err := r.db.WithContext(ctx).Save(&entry).Error; err != nil {
+	// CRITICAL: Only update the xattrs column — NOT the entire row.
+	// A full Save() would overwrite Size/ModTime with whatever was read
+	// above, clobbering any concurrent Flush/Rename updates.
+	if err := r.db.WithContext(ctx).Model(&entry).Update("xattrs", entry.Xattrs).Error; err != nil {
 		return fmt.Errorf("failed to save xattr: %w", err)
 	}
 
@@ -231,7 +241,8 @@ func (r *SQLiteRepository) RemoveXattr(ctx context.Context, path, name string) e
 
 	entry.RemoveXattr(name)
 
-	if err := r.db.WithContext(ctx).Save(&entry).Error; err != nil {
+	// Only update the xattrs column — same reason as SetXattr above.
+	if err := r.db.WithContext(ctx).Model(&entry).Update("xattrs", entry.Xattrs).Error; err != nil {
 		return fmt.Errorf("failed to save entry: %w", err)
 	}
 

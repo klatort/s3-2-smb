@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -297,9 +298,15 @@ func (c *Client) CopyObject(ctx context.Context, srcKey, dstKey string) error {
 	fullSrcKey := c.GetFullKey(srcKey)
 	fullDstKey := c.GetFullKey(dstKey)
 
+	// CopySource MUST be URL-encoded per the S3 API spec.
+	// Without this, paths with non-ASCII chars (e.g. 'Almacén') cause
+	// silent copy failures on Huawei OBS — the server returns success
+	// but the destination object may be empty or contain wrong data.
+	encodedSrc := c.bucket + "/" + encodePath(fullSrcKey)
+
 	_, err := c.client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:     aws.String(c.bucket),
-		CopySource: aws.String(c.bucket + "/" + fullSrcKey),
+		CopySource: aws.String(encodedSrc),
 		Key:        aws.String(fullDstKey),
 	})
 	if err != nil {
@@ -307,6 +314,15 @@ func (c *Client) CopyObject(ctx context.Context, srcKey, dstKey string) error {
 	}
 
 	return nil
+}
+
+// encodePath URL-encodes each segment of an S3 key path while preserving slashes.
+func encodePath(path string) string {
+	segments := strings.Split(path, "/")
+	for i, seg := range segments {
+		segments[i] = url.PathEscape(seg)
+	}
+	return strings.Join(segments, "/")
 }
 
 // ListObjects lists objects with a given prefix (for directory listing)
